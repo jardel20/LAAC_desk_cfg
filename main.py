@@ -6,59 +6,17 @@ import io
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy import stats
+from scipy.interpolate import interp1d
 
 # Configurar página
 st.set_page_config(
-    page_title="Sistema de Calibração de Bancadas",
-    page_icon="🔬",
-    layout="wide"
+    page_title="Sistema de Calibração de Bancadas LAAC - Spectral Int",
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# CSS personalizado para melhorar a aparência
-st.markdown("""
-<style>
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 4px 4px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #4CAF50;
-        color: white;
-    }
-    .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 5px;
-        border-left: 4px solid #4CAF50;
-    }
-    .input-grid {
-        display: grid;
-        grid-template-columns: repeat(5, 1fr);
-        gap: 10px;
-        margin-bottom: 20px;
-    }
-    .input-cell {
-        padding: 8px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        text-align: center;
-    }
-    .input-label {
-        font-weight: bold;
-        margin-bottom: 5px;
-        color: #333;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Usar tema padrão do Streamlit
 
 
 class SistemaCalibracao:
@@ -122,7 +80,7 @@ class SistemaCalibracao:
             st.session_state.parametros_temporais = {
                 'hora_inicio': 6,
                 'hora_fim': 18,
-                'n_pontos': 30
+                'n_pontos': 60  # Aumentado para linhas mais suaves
             }
 
         self.calcular_regressoes()
@@ -130,6 +88,10 @@ class SistemaCalibracao:
     def calcular_mediana(self, dados):
         """Calcula a mediana dos dados"""
         return np.median(dados, axis=0)
+
+    def calcular_media(self, dados):
+        """Calcula a média dos dados"""
+        return np.mean(dados, axis=0)
 
     def calcular_regressao(self, x, y):
         """Calcula regressão linear"""
@@ -153,15 +115,26 @@ class SistemaCalibracao:
         for canal in ['azul', 'vermelho', 'branco']:
             dados = st.session_state.dados_bancada[canal]
             medianas = self.calcular_mediana(dados['dados'])
+            medias = self.calcular_media(dados['dados'])
             x = dados['valores_referencia']
 
-            regressao = self.calcular_regressao(x, medianas)
-            valores_previstos = regressao['a'] * x + regressao['b']
+            # Calcular regressão usando medianas
+            regressao_mediana = self.calcular_regressao(x, medianas)
+            valores_previstos_mediana = regressao_mediana['a'] * \
+                x + regressao_mediana['b']
+
+            # Calcular regressão usando médias
+            regressao_media = self.calcular_regressao(x, medias)
+            valores_previstos_media = regressao_media['a'] * \
+                x + regressao_media['b']
 
             self.regressoes[canal] = {
                 'medianas': medianas,
-                'regressao': regressao,
-                'valores_previstos': valores_previstos
+                'medias': medias,
+                'regressao_mediana': regressao_mediana,
+                'regressao_media': regressao_media,
+                'valores_previstos_mediana': valores_previstos_mediana,
+                'valores_previstos_media': valores_previstos_media
             }
 
     def calcular_gaussiana(self, x, sigma, mi, intensidade_max, intensidade_min):
@@ -169,7 +142,7 @@ class SistemaCalibracao:
         return intensidade_min + (intensidade_max - intensidade_min) * np.exp(-((x - mi)**2) / (2 * sigma**2))
 
     def gerar_dados_canal(self, canal, sigma, mi):
-        """Gera dados para um canal específico"""
+        """Gera dados para um canal específico com linhas suaves"""
         params = st.session_state.parametros_canais
         tempo = st.session_state.parametros_temporais
 
@@ -192,18 +165,28 @@ class SistemaCalibracao:
         intensidade_min = params['intensidade_min_total'] / \
             soma_proporcoes * proporcao_norm
 
-        # Gerar pontos
-        x_vals = np.linspace(-1, 1, tempo['n_pontos'])
+        # Gerar pontos com alta resolução para linhas suaves
+        n_pontos = tempo['n_pontos']
+        x_vals = np.linspace(-1, 1, n_pontos)
         horas_decimais = np.linspace(
-            tempo['hora_inicio'], tempo['hora_fim'], tempo['n_pontos'])
+            tempo['hora_inicio'], tempo['hora_fim'], n_pontos)
 
         # Calcular intensidades
         intensidades = self.calcular_gaussiana(
             x_vals, sigma, mi, intensidade_max, intensidade_min)
 
+        # Suavizar as curvas usando interpolação
+        if n_pontos < 50:  # Se poucos pontos, interpolar para suavizar
+            x_interp = np.linspace(-1, 1, 200)
+            f = interp1d(x_vals, intensidades, kind='cubic')
+            intensidades = f(x_interp)
+            horas_decimais = np.linspace(
+                tempo['hora_inicio'], tempo['hora_fim'], 200)
+            x_vals = x_interp
+
         # Calcular integral
         delta_t_segundos = (
-            tempo['hora_fim'] - tempo['hora_inicio']) * 3600 / (tempo['n_pontos'] - 1)
+            tempo['hora_fim'] - tempo['hora_inicio']) * 3600 / (len(x_vals) - 1)
         integral = np.cumsum(intensidades) * delta_t_segundos / 1_000_000
 
         # Calcular ICE e DLI
@@ -262,11 +245,11 @@ class SistemaCalibracao:
             # Dados das repetições
             for i in range(5):
                 row = [f'Repetição {i+1}'] + list(dados['dados'][i]) + [
-                    '', '', f"{reg['regressao']['a']:.6f}" if i == 0 else '']
+                    '', '', f"{reg['regressao_mediana']['a']:.6f}" if i == 0 else '']
                 bancada_data.append(row)
 
             bancada_data.append(
-                ['', '', '', '', '', '', '', f"{reg['regressao']['b']:.6f}"])
+                ['', '', '', '', '', '', '', f"{reg['regressao_mediana']['b']:.6f}"])
             bancada_data.append([''])
 
         bancada_df = pd.DataFrame(bancada_data)
@@ -334,42 +317,59 @@ class SistemaCalibracao:
 sistema = SistemaCalibracao()
 
 # Título principal
-st.title("🔬 Sistema de Calibração de Bancadas")
+st.title("🖥️ Sistema de Calibração de Bancadas")
+
+with st.expander("⚠️ INSTRUÇÕES IMPORTANTES", expanded=False):
+    st.info("""
+    **IMPORTANTE:**
+
+    1. **Ao trabalhar com duas bancadas:**
+       - Quando for escolher o range de PPFD que o experimento trabalhará, é preciso escolher:
+         - **O maior valor entre os dois mínimos** das bancadas de cada canal
+         - **O menor valor entre os dois máximos** das bancadas de cada canal
+    
+    2. **Configuração de arquivos LAMP_CH_X.txt:**
+       - Todos os canais (inclusive o quarto) devem iniciar e terminar no mesmo horário
+       - Isso evita que o equipamento ligue e desligue sem ativação configurada de dois dos três canais
+    
+    3. **Atenção às proporções:**
+       - A proporção escolhida é entre canais físicos de LEDs
+       - **NÃO** é de banda espectral
+    """)
+
 st.markdown("---")
 
 # Barra lateral
 with st.sidebar:
-    st.header("⚙️ Navegação")
+    st.header("NAVEGAÇÃO")
 
     # Usar tabs para navegação
     aba_selecionada = st.radio(
         "Selecione a seção:",
         ["📊 Visão Geral",
          "🧪 Calibração Bancada",
+         "🔄 Configurar Canais",
          "🔴 Canal Vermelho",
          "🔵 Canal Azul",
-         "⚪ Canal Branco",
-         "🔄 Configurar Canais",
-         "📈 Gráficos Comparativos",
-         "💾 Exportar Dados"],
+         "⚪ Canal Branco"],
         label_visibility="collapsed"
     )
 
     st.markdown("---")
 
     if aba_selecionada != "🧪 Calibração Bancada":
-        st.header("⚡ Configurações Rápidas")
+        st.header("⚙️ Configurações Rápidas")
 
-        with st.expander("⏰ Horários"):
+        with st.expander("⏰ Horários", expanded=False):
             hora_inicio = st.number_input("Hora Início", 0, 23,
                                           st.session_state.parametros_temporais['hora_inicio'],
                                           key="hora_inicio_sidebar")
             hora_fim = st.number_input("Hora Fim", 0, 23,
                                        st.session_state.parametros_temporais['hora_fim'],
                                        key="hora_fim_sidebar")
-            n_pontos = st.number_input("Nº de Pontos", 10, 200,
-                                       st.session_state.parametros_temporais['n_pontos'],
-                                       key="n_pontos_sidebar")
+            n_pontos = st.slider("Nº de Pontos", 10, 500,
+                                 st.session_state.parametros_temporais['n_pontos'],
+                                 key="n_pontos_sidebar")
 
             if (hora_inicio != st.session_state.parametros_temporais['hora_inicio'] or
                 hora_fim != st.session_state.parametros_temporais['hora_fim'] or
@@ -381,29 +381,29 @@ with st.sidebar:
                 })
                 st.rerun()
 
-        with st.expander("📐 Gaussianas"):
+        with st.expander("📐 Gaussianas", expanded=False):
             col1, col2 = st.columns(2)
             with col1:
                 sigma_vermelho = st.slider("σ Vermelho", 0.1, 1.0,
                                            st.session_state.parametros_gaussianos['canal_vermelho']['sigma'],
-                                           0.05, key="sigma_v_sidebar")
+                                           0.01, key="sigma_v_sidebar")
                 sigma_azul = st.slider("σ Azul", 0.1, 1.0,
                                        st.session_state.parametros_gaussianos['canal_azul']['sigma'],
-                                       0.05, key="sigma_a_sidebar")
+                                       0.01, key="sigma_a_sidebar")
                 sigma_branco = st.slider("σ Branco", 0.1, 1.0,
                                          st.session_state.parametros_gaussianos['canal_branco']['sigma'],
-                                         0.05, key="sigma_b_sidebar")
+                                         0.01, key="sigma_b_sidebar")
 
             with col2:
                 mi_vermelho = st.slider("μ Vermelho", -1.0, 1.0,
                                         st.session_state.parametros_gaussianos['canal_vermelho']['mi'],
-                                        0.1, key="mi_v_sidebar")
+                                        0.05, key="mi_v_sidebar")
                 mi_azul = st.slider("μ Azul", -1.0, 1.0,
                                     st.session_state.parametros_gaussianos['canal_azul']['mi'],
-                                    0.1, key="mi_a_sidebar")
+                                    0.05, key="mi_a_sidebar")
                 mi_branco = st.slider("μ Branco", -1.0, 1.0,
                                       st.session_state.parametros_gaussianos['canal_branco']['mi'],
-                                      0.1, key="mi_b_sidebar")
+                                      0.05, key="mi_b_sidebar")
 
             if (sigma_vermelho != st.session_state.parametros_gaussianos['canal_vermelho']['sigma'] or
                 sigma_azul != st.session_state.parametros_gaussianos['canal_azul']['sigma'] or
@@ -419,13 +419,10 @@ with st.sidebar:
                 })
                 st.rerun()
 
+
 # Funções para cada aba
-
-
 def exibir_visao_geral():
     """Exibe a visão geral do sistema"""
-
-    # Métricas principais
     st.header("📊 Visão Geral do Sistema")
 
     # Obter dados dos canais
@@ -438,21 +435,21 @@ def exibir_visao_geral():
 
     with col1:
         st.metric(
-            "DLI Vermelho",
+            "🔴 DLI Vermelho",
             f"{dados_vermelho['DLI_final']:.2f} mol/m²",
             delta=f"ICE: {dados_vermelho['ICE']:.1f} μmol/m²/s"
         )
 
     with col2:
         st.metric(
-            "DLI Azul",
+            "🔵 DLI Azul",
             f"{dados_azul['DLI_final']:.2f} mol/m²",
             delta=f"ICE: {dados_azul['ICE']:.1f} μmol/m²/s"
         )
 
     with col3:
         st.metric(
-            "DLI Branco",
+            "⚪DLI Branco",
             f"{dados_branco['DLI_final']:.2f} mol/m²",
             delta=f"ICE: {dados_branco['ICE']:.1f} μmol/m²/s"
         )
@@ -467,134 +464,306 @@ def exibir_visao_geral():
 
     st.markdown("---")
 
-    # Regressões da bancada
+    # Regressões lineares da bancada - LADO A LADO
     st.header("📐 Regressões Lineares da Bancada")
 
-    tabs = st.tabs(["Azul", "Vermelho", "Branco"])
+    col1, col2, col3 = st.columns(3)
 
-    for idx, (canal_nome, tab) in enumerate(zip(['azul', 'vermelho', 'branco'], tabs)):
-        with tab:
+    for idx, (canal_nome, col, cor) in enumerate(zip(
+        ['azul', 'vermelho', 'branco'],
+        [col1, col2, col3],
+        ['blue', 'red', 'gray']
+    )):
+        with col:
             reg = sistema.regressoes[canal_nome]
 
-            col1, col2 = st.columns([2, 1])
+            # Gráfico de regressão
+            x = st.session_state.dados_bancada[canal_nome]['valores_referencia']
+            y_medido = reg['medianas']
+            y_previsto = reg['valores_previstos_mediana']
 
-            with col1:
-                # Gráfico de regressão com Plotly
-                x = st.session_state.dados_bancada[canal_nome]['valores_referencia']
-                y_medido = reg['medianas']
-                y_previsto = reg['valores_previstos']
+            fig = go.Figure()
 
-                fig = go.Figure()
-
-                # Pontos medidos
-                fig.add_trace(go.Scatter(
-                    x=x, y=y_medido,
-                    mode='markers',
-                    name='Dados medidos',
-                    marker=dict(
-                        size=10,
-                        color='red' if canal_nome == 'vermelho' else
-                              'blue' if canal_nome == 'azul' else 'gray',
-                        line=dict(width=1, color='DarkSlateGrey')
-                    )
-                ))
-
-                # Linha de regressão
-                fig.add_trace(go.Scatter(
-                    x=x, y=y_previsto,
-                    mode='lines',
-                    name='Regressão linear',
-                    line=dict(color='black', width=2)
-                ))
-
-                # Configurações do gráfico
-                fig.update_layout(
-                    title=f'Regressão Linear - Canal {canal_nome.capitalize()}',
-                    xaxis_title='Valor de Referência',
-                    yaxis_title='PPFD Medido (μmol/m²/s)',
-                    hovermode='x unified',
-                    height=400,
-                    showlegend=True,
-                    template='plotly_white'
+            # Pontos medidos
+            fig.add_trace(go.Scatter(
+                x=x, y=y_medido,
+                mode='markers',
+                name='Dados medidos',
+                marker=dict(
+                    size=8,
+                    color=cor,
+                    line=dict(width=1, color='DarkSlateGrey')
                 )
+            ))
 
-                # Adicionar equação no gráfico
-                eq_text = f"y = {reg['regressao']['a']:.3f}x + {reg['regressao']['b']:.3f}<br>R² = {reg['regressao']['r2']:.4f}"
-                fig.add_annotation(
-                    x=0.05, y=0.95,
-                    xref="paper", yref="paper",
-                    text=eq_text,
-                    showarrow=False,
-                    font=dict(size=12),
-                    bgcolor="white",
-                    bordercolor="black",
-                    borderwidth=1,
-                    borderpad=4
-                )
+            # Linha de regressão
+            fig.add_trace(go.Scatter(
+                x=x, y=y_previsto,
+                mode='lines',
+                name='Regressão linear',
+                line=dict(color='black', width=2)
+            ))
 
-                st.plotly_chart(fig, use_container_width=True)
+            fig.update_layout(
+                title=f'Canal {canal_nome.capitalize()}',
+                xaxis_title='Valor de Referência',
+                yaxis_title='PPFD (μmol/m²/s)',
+                hovermode='x unified',
+                height=350,
+                showlegend=True,
+                margin=dict(l=50, r=50, t=50, b=50)
+            )
 
-            with col2:
-                # Estatísticas da regressão
-                st.subheader("Estatísticas")
+            # Adicionar equação
+            eq_text = f"y = {reg['regressao_mediana']['a']:.3f}x + {reg['regressao_mediana']['b']:.3f}<br>R² = {reg['regressao_mediana']['r2']:.4f}"
+            fig.add_annotation(
+                x=0.05, y=0.95,
+                xref="paper", yref="paper",
+                text=eq_text,
+                showarrow=False,
+                font=dict(size=10),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="black",
+                borderwidth=1,
+                borderpad=4
+            )
 
-                stats_data = {
-                    'Parâmetro': ['Coef. Angular (a)', 'Coef. Linear (b)',
-                                  'R²', 'R', 'p-value', 'Erro Padrão'],
-                    'Valor': [
-                        f"{reg['regressao']['a']:.4f}",
-                        f"{reg['regressao']['b']:.4f}",
-                        f"{reg['regressao']['r2']:.4f}",
-                        f"{reg['regressao']['r']:.4f}",
-                        f"{reg['regressao']['p_value']:.4e}" if reg['regressao']['p_value'] > 0 else "0.0000",
-                        f"{reg['regressao']['std_err']:.4f}"
-                    ]
-                }
+            st.plotly_chart(fig, use_container_width=True)
 
-                st.dataframe(pd.DataFrame(stats_data),
-                             hide_index=True, use_container_width=True)
+            # Estatísticas da regressão
+            st.markdown("**Estatísticas da Regressão:**")
+            stats_data = {
+                'Parâmetro': ['a', 'b', 'R²', 'p-valor', 'Erro'],
+                'Valor': [
+                    f"{reg['regressao_mediana']['a']:.4f}",
+                    f"{reg['regressao_mediana']['b']:.4f}",
+                    f"{reg['regressao_mediana']['r2']:.4f}",
+                    f"{reg['regressao_mediana']['p_value']:.4e}" if reg['regressao_mediana']['p_value'] > 0 else "0.0000",
+                    f"{reg['regressao_mediana']['std_err']:.4f}"
+                ]
+            }
 
-                # Informações adicionais
-                st.info(f"""
-                **Canal {canal_nome.capitalize()}**
-                - **Mediana máxima:** {max(reg['medianas']):.1f} μmol/m²/s
-                - **Mediana mínima:** {min(reg['medianas']):.1f} μmol/m²/s
-                - **Amplitude:** {max(reg['medianas']) - min(reg['medianas']):.1f} μmol/m²/s
-                """)
+            df_stats = pd.DataFrame(stats_data)
+            st.dataframe(df_stats, hide_index=True, use_container_width=True)
+
+            # Estatísticas do canal
+            st.markdown("**Estatísticas do Canal:**")
+            col_stat1, col_stat2 = st.columns(2)
+            with col_stat1:
+                st.metric("Máx", f"{max(reg['medianas']):.1f}")
+                st.metric("Mín", f"{min(reg['medianas']):.1f}")
+            with col_stat2:
+                st.metric(
+                    "Amplitude", f"{max(reg['medianas']) - min(reg['medianas']):.1f}")
+                st.metric("Média", f"{np.mean(reg['medianas']):.1f}")
 
     st.markdown("---")
 
-    # Gráfico comparativo de intensidades
-    st.header("⚡ Comparação de Intensidades dos Canais")
+    # Gráficos Comparativos
+    st.header("📈 Comparação entre Canais")
 
-    fig = go.Figure()
+    # Gráfico 1: Intensidades comparadas com soma
+    st.subheader("⚡ Intensidade dos Canais")
 
-    for canal_nome, cor, nome in [('vermelho', 'red', 'Vermelho'),
-                                  ('azul', 'blue', 'Azul'),
-                                  ('branco', 'gray', 'Branco')]:
-        dados = sistema.get_dados_canal(canal_nome)
+    fig1 = go.Figure()
 
-        fig.add_trace(go.Scatter(
-            x=dados['hora_decimal'],
-            y=dados['Intensidade'],
-            mode='lines',
-            name=nome,
-            line=dict(color=cor, width=2),
-            hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
-        ))
+    # Calcular soma das intensidades
+    soma_intensidades = dados_vermelho['Intensidade'] + \
+        dados_azul['Intensidade'] + dados_branco['Intensidade']
 
-    fig.update_layout(
-        title='Intensidade dos Canais ao Longo do Dia',
+    # Suavizar linhas usando interpolação
+    def suavizar_curva(x, y, n_points=500):
+        if len(x) < n_points:
+            f = interp1d(x, y, kind='cubic')
+            x_new = np.linspace(min(x), max(x), n_points)
+            y_new = f(x_new)
+            return x_new, y_new
+        return x, y
+
+    horas_v, intens_v = suavizar_curva(
+        dados_vermelho['hora_decimal'], dados_vermelho['Intensidade'])
+    horas_a, intens_a = suavizar_curva(
+        dados_azul['hora_decimal'], dados_azul['Intensidade'])
+    horas_b, intens_b = suavizar_curva(
+        dados_branco['hora_decimal'], dados_branco['Intensidade'])
+
+    fig1.add_trace(go.Scatter(
+        x=horas_v,
+        y=intens_v,
+        mode='lines',
+        name='Vermelho',
+        line=dict(color='red', width=2, shape='spline'),
+        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
+    ))
+
+    fig1.add_trace(go.Scatter(
+        x=horas_a,
+        y=intens_a,
+        mode='lines',
+        name='Azul',
+        line=dict(color='blue', width=2, shape='spline'),
+        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
+    ))
+
+    fig1.add_trace(go.Scatter(
+        x=horas_b,
+        y=intens_b,
+        mode='lines',
+        name='Branco',
+        line=dict(color='gray', width=2, shape='spline'),
+        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
+    ))
+
+    # Calcular e adicionar soma (dashed)
+    horas_soma, soma_suave = suavizar_curva(
+        dados_vermelho['hora_decimal'], soma_intensidades)
+    fig1.add_trace(go.Scatter(
+        x=horas_soma,
+        y=soma_suave,
+        mode='lines',
+        name='Soma Total',
+        line=dict(color='black', width=3, dash='dash', shape='spline'),
+        hovertemplate='Hora: %{x:.2f}<br>Soma: %{y:.2f} μmol/m²/s'
+    ))
+
+    fig1.update_layout(
         xaxis_title='Hora do Dia',
         yaxis_title='Intensidade (μmol/m²/s)',
         hovermode='x unified',
-        height=500,
+        height=450,
         legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="right", x=1),
-        template='plotly_white'
+                    y=1.02, xanchor="right", x=1)
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Gráfico 2: DLIs finais comparados
+    st.subheader("📊 DLIs Finais por Canal")
+
+    dli_data = {
+        'Canal': ['Vermelho', 'Azul', 'Branco', 'Total'],
+        'DLI Final (mol/m²)': [
+            dados_vermelho['DLI_final'],
+            dados_azul['DLI_final'],
+            dados_branco['DLI_final'],
+            dados_vermelho['DLI_final'] +
+            dados_azul['DLI_final'] + dados_branco['DLI_final']
+        ],
+        'ICE (μmol/m²/s)': [
+            dados_vermelho['ICE'],
+            dados_azul['ICE'],
+            dados_branco['ICE'],
+            dados_vermelho['ICE'] + dados_azul['ICE'] + dados_branco['ICE']
+        ]
+    }
+
+    df_dli = pd.DataFrame(dli_data)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig2 = go.Figure(data=[
+            go.Bar(
+                x=df_dli['Canal'],
+                y=df_dli['DLI Final (mol/m²)'],
+                marker_color=['red', 'blue', 'gray', 'green'],
+                text=df_dli['DLI Final (mol/m²)'].round(3),
+                textposition='outside'
+            )
+        ])
+
+        fig2.update_layout(
+            title='DLI Final por Canal',
+            yaxis_title='DLI Final (mol/m²)',
+            height=400
+        )
+
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with col2:
+        fig3 = go.Figure(data=[
+            go.Bar(
+                x=df_dli['Canal'],
+                y=df_dli['ICE (μmol/m²/s)'],
+                marker_color=['red', 'blue', 'gray', 'green'],
+                text=df_dli['ICE (μmol/m²/s)'].round(1),
+                textposition='outside'
+            )
+        ])
+
+        fig3.update_layout(
+            title='ICE por Canal',
+            yaxis_title='ICE (μmol/m²/s)',
+            height=400
+        )
+
+        st.plotly_chart(fig3, use_container_width=True)
+
+    # Tabelas dos canais lado a lado
+    st.subheader("📋 Dados dos Canais")
+
+    col_t1, col_t2, col_t3 = st.columns(3)
+
+    # Função para criar tabela de dados do canal
+    def criar_tabela_canal(dados, canal_nome, cor):
+        df = pd.DataFrame({
+            'Hora': dados['hora_decimal'],
+            'Intensidade': dados['Intensidade'],
+            'Integral': dados['Integral']
+        })
+
+        # Formatar números
+        df['Hora'] = df['Hora'].apply(lambda x: f"{x:.2f}")
+        df['Intensidade'] = df['Intensidade'].apply(lambda x: f"{x:.2f}")
+        df['Integral'] = df['Integral'].apply(lambda x: f"{x:.6f}")
+
+        return df
+
+    with col_t1:
+        st.markdown("**🔴 Canal Vermelho**")
+        df_vermelho = criar_tabela_canal(dados_vermelho, 'vermelho', 'red')
+        st.dataframe(df_vermelho, height=400, use_container_width=True)
+
+    with col_t2:
+        st.markdown("**🔵 Canal Azul**")
+        df_azul = criar_tabela_canal(dados_azul, 'azul', 'blue')
+        st.dataframe(df_azul, height=400, use_container_width=True)
+
+    with col_t3:
+        st.markdown("**⚪ Canal Branco**")
+        df_branco = criar_tabela_canal(dados_branco, 'branco', 'gray')
+        st.dataframe(df_branco, height=400, use_container_width=True)
+
+    # Exportar dados para Excel
+    st.markdown("---")
+    st.header("💾 Exportar Dados para Excel")
+
+    st.info("""
+    Clique no botão abaixo para gerar um arquivo Excel contendo todas as planilhas,
+    fiel à planilha original. O arquivo incluirá:
+    
+    - **bancada**: Dados de calibração e regressões lineares
+    - **canal_vermelho**: Dados do canal vermelho com gaussiana
+    - **canal_azul**: Dados do canal azul com gaussiana
+    - **canal_branco**: Dados do canal branco com gaussiana
+    - **configurar canais**: Configuração de proporções e dados combinados
+    """)
+
+    # Botão para exportar
+    if st.button("📥 Gerar Arquivo Excel Completo", type="primary", use_container_width=True):
+        with st.spinner("Gerando arquivo Excel..."):
+            excel_data = sistema.exportar_para_excel()
+
+            st.success("✅ Arquivo Excel gerado com sucesso!")
+
+            st.download_button(
+                label="⬇️ Baixar Arquivo Excel",
+                data=excel_data,
+                file_name="calibracao_bancadas_completa.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
 
 
 def exibir_calibracao_bancada():
@@ -623,65 +792,103 @@ def exibir_calibracao_bancada():
         st.markdown("**Valores de Referência:**")
         ref_vals = dados_canal['valores_referencia']
 
-        # Grid de entrada
-        st.markdown("<div class='input-grid'>", unsafe_allow_html=True)
+        # Container para o grid
+        grid_container = st.container()
 
-        # Cabeçalho
-        cols = st.columns(6)
-        with cols[0]:
-            st.markdown("<div class='input-label'>Repetição</div>",
-                        unsafe_allow_html=True)
-        for i in range(5):
-            with cols[i+1]:
-                st.markdown(f"<div class='input-label'>Intensidade {i+1}<br>(Ref: {ref_vals[i]})</div>",
-                            unsafe_allow_html=True)
-
-        # Linhas de dados
-        for rep in range(5):
+        with grid_container:
+            # Cabeçalho
             cols = st.columns(6)
             with cols[0]:
-                st.markdown(
-                    f"<div class='input-label'>Repetição {rep+1}</div>", unsafe_allow_html=True)
+                st.markdown("**Repetição**")
+            for i in range(5):
+                with cols[i+1]:
+                    st.markdown(
+                        f"**Intensidade {i+1}**<br>(Ref: {ref_vals[i]})", unsafe_allow_html=True)
 
-            for intens in range(5):
-                with cols[intens+1]:
-                    # Criar chave única para cada campo
-                    key = f"input_{canal_key}_{rep}_{intens}"
+            # Linhas de dados
+            for rep in range(5):
+                cols = st.columns(6)
+                with cols[0]:
+                    st.markdown(f"**Repetição {rep+1}**")
 
-                    # Usar st.number_input com formatação
-                    valor = st.number_input(
-                        "",
-                        min_value=0.0,
-                        max_value=1000.0,
-                        value=float(dados_canal['dados'][rep, intens]),
-                        step=0.1,
-                        format="%.2f",
-                        key=key,
-                        label_visibility="collapsed"
-                    )
+                for intens in range(5):
+                    with cols[intens+1]:
+                        # Criar chave única para cada campo
+                        key = f"input_{canal_key}_{rep}_{intens}"
 
-                    # Atualizar dados se houver mudança
-                    if valor != dados_canal['dados'][rep, intens]:
-                        dados_canal['dados'][rep, intens] = valor
-                        sistema.calcular_regressoes()
+                        # Usar st.number_input com formatação
+                        valor = st.number_input(
+                            "",
+                            min_value=0.0,
+                            max_value=1000.0,
+                            value=float(dados_canal['dados'][rep, intens]),
+                            step=0.1,
+                            format="%.2f",
+                            key=key,
+                            label_visibility="collapsed"
+                        )
+
+                        # Atualizar dados se houver mudança
+                        if valor != dados_canal['dados'][rep, intens]:
+                            dados_canal['dados'][rep, intens] = valor
+                            sistema.calcular_regressoes()
 
     with col2:
         # Estatísticas rápidas
         st.subheader("📊 Estatísticas")
 
-        medianas = sistema.regressoes[canal_key]['medianas']
-        reg = sistema.regressoes[canal_key]['regressao']
+        reg = sistema.regressoes[canal_key]['regressao_media']
+        medias = sistema.regressoes[canal_key]['medias']
 
-        st.metric("Mediana Máxima", f"{max(medianas):.2f}")
-        st.metric("Mediana Mínima", f"{min(medianas):.2f}")
+        st.metric("Média Máxima", f"{max(medias):.2f}")
+        st.metric("Média Mínima", f"{min(medias):.2f}")
         st.metric("Coef. Angular (a)", f"{reg['a']:.4f}")
         st.metric("Coef. Linear (b)", f"{reg['b']:.4f}")
         st.metric("R²", f"{reg['r2']:.4f}")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Botão para resetar dados
+        if st.button("🔄 Restaurar Valores Padrão", key="reset_button"):
+            # Definir valores padrão baseados no canal
+            if canal_key == 'azul':
+                default_data = np.array([
+                    [24.86, 29.3, 27.6, 22.53, 29.51],
+                    [76.45, 74.32, 73.75, 58.78, 66.12],
+                    [114.8, 106.9, 114.6, 102.9, 100.9],
+                    [135.5, 127.1, 138.0, 120.2, 119.8],
+                    [175.7, 177.0, 164.1, 145.0, 170.0]
+                ]).T
+            elif canal_key == 'vermelho':
+                default_data = np.array([
+                    [58.12, 57.3, 54.3, 55.9, 52.0],
+                    [143.9, 168.3, 160.4, 147.6, 158.1],
+                    [235.3, 227.2, 198.0, 233.5, 224.5],
+                    [279.5, 293.3, 272.2, 302.7, 281.7],
+                    [360.5, 354.2, 407.3, 398.5, 367.8]
+                ]).T
+            else:  # branco
+                default_data = np.array([
+                    [20.61, 24.51, 24.24, 22.42, 23.14],
+                    [62.13, 67.69, 58.93, 59.12, 55.09],
+                    [69.18, 92.19, 91.02, 86.68, 84.73],
+                    [109.8, 104.6, 117.0, 113.7, 110.3],
+                    [120.8, 150.9, 143.3, 130.7, 143.9]
+                ]).T
 
-    # Visualização gráfica em tempo real
+            # Atualizar dados
+            st.session_state.dados_bancada[canal_key]['dados'] = default_data
+            sistema.calcular_regressoes()
+            st.success(
+                f"Valores padrão restaurados para o canal {canal_selecionado}!")
+            st.rerun()
+
+    # Visualização gráfica em tempo real - MESMO GRÁFICO DA VISÃO GERAL
     st.subheader("📈 Visualização em Tempo Real")
+
+    # Obter dados da regressão
+    reg = sistema.regressoes[canal_key]
+    x = st.session_state.dados_bancada[canal_key]['valores_referencia']
+    y_medido = reg['medianas']
+    y_previsto = reg['valores_previstos_mediana']
 
     fig = go.Figure()
 
@@ -696,60 +903,109 @@ def exibir_calibracao_bancada():
             showlegend=True
         ))
 
-    # Plotar mediana
+    # Plotar média
+    medias = sistema.regressoes[canal_key]['medias']
     fig.add_trace(go.Scatter(
         x=ref_vals,
-        y=medianas,
+        y=medias,
         mode='lines+markers',
-        name='Mediana',
+        name='Média',
         line=dict(color='black', width=3),
         marker=dict(size=12, color='black')
     ))
 
-    # Plotar regressão
-    y_previsto = sistema.regressoes[canal_key]['valores_previstos']
+    # Plotar regressão (usando média)
+    y_previsto = sistema.regressoes[canal_key]['valores_previstos_media']
     fig.add_trace(go.Scatter(
         x=ref_vals,
         y=y_previsto,
         mode='lines',
-        name='Regressão',
+        name='Regressão (média)',
         line=dict(color='red', width=2, dash='dash')
     ))
 
     fig.update_layout(
-        title=f'Dados de Calibração - Canal {canal_selecionado}',
+        title=f'Regressão Linear - Canal {canal_selecionado}',
         xaxis_title='Valor de Referência',
         yaxis_title='PPFD Medido (μmol/m²/s)',
         hovermode='x unified',
-        height=500,
-        template='plotly_white'
+        height=500
+    )
+
+    # Adicionar equação no gráfico
+    eq_text = f"y = {reg['regressao_mediana']['a']:.3f}x + {reg['regressao_mediana']['b']:.3f}<br>R² = {reg['regressao_mediana']['r2']:.4f}"
+    fig.add_annotation(
+        x=0.05, y=0.95,
+        xref="paper", yref="paper",
+        text=eq_text,
+        showarrow=False,
+        font=dict(size=12),
+        bgcolor="rgba(255,255,255,0.8)",
+        bordercolor="black",
+        borderwidth=1,
+        borderpad=4
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Botão para resetar dados
-    if st.button("🔄 Resetar para Valores Padrão"):
-        st.session_state.dados_bancada[canal_key]['dados'] = np.array([
-            [24.86, 29.3, 27.6, 22.53, 29.51],
-            [76.45, 74.32, 73.75, 58.78, 66.12],
-            [114.8, 106.9, 114.6, 102.9, 100.9],
-            [135.5, 127.1, 138.0, 120.2, 119.8],
-            [175.7, 177.0, 164.1, 145.0, 170.0]
-        ]).T if canal_key == 'azul' else np.array([
-            [58.12, 57.3, 54.3, 55.9, 52.0],
-            [143.9, 168.3, 160.4, 147.6, 158.1],
-            [235.3, 227.2, 198.0, 233.5, 224.5],
-            [279.5, 293.3, 272.2, 302.7, 281.7],
-            [360.5, 354.2, 407.3, 398.5, 367.8]
-        ]).T if canal_key == 'vermelho' else np.array([
-            [20.61, 24.51, 24.24, 22.42, 23.14],
-            [62.13, 67.69, 58.93, 59.12, 55.09],
-            [69.18, 92.19, 91.02, 86.68, 84.73],
-            [109.8, 104.6, 117.0, 113.7, 110.3],
-            [120.8, 150.9, 143.3, 130.7, 143.9]
-        ]).T
-        sistema.calcular_regressoes()
-        st.rerun()
+    # Tabela com equação e valores calculados
+    st.subheader("📊 Equação de Regressão e Valores Calculados")
+
+    # Obter dados da regressão
+    reg = sistema.regressoes[canal_key]['regressao_media']
+    medias = sistema.regressoes[canal_key]['medias']
+    valores_previstos = sistema.regressoes[canal_key]['valores_previstos_media']
+    ref_vals = dados_canal['valores_referencia']
+
+    # Exibir equação
+    col1, col2 = st.columns([1, 3])
+
+    with col1:
+        st.markdown("**Equação de Regressão:**")
+        st.info(f"""
+        **y = {reg['a']:.4f}x + {reg['b']:.4f}**
+        
+        Onde:
+        - **y** = PPFD calculado (μmol/m²/s)
+        - **x** = Valor de referência
+        - **R²** = {reg['r2']:.4f}
+        """)
+
+    with col2:
+        # Criar tabela com valores
+        tabela_dados = []
+        for i in range(5):
+            erro_relativo = abs(
+                (valores_previstos[i] - medias[i]) / medias[i] * 100) if medias[i] != 0 else 0
+            tabela_dados.append({
+                'Intensidade': i+1,
+                'Ref. (x)': ref_vals[i],
+                'Média Medida': f"{medias[i]:.2f}",
+                'Valor Calculado': f"{valores_previstos[i]:.2f}",
+                'Diferença': f"{valores_previstos[i] - medias[i]:.2f}",
+                'Erro Relativo (%)': f"{erro_relativo:.2f}"
+            })
+
+        df_tabela = pd.DataFrame(tabela_dados)
+
+        st.dataframe(
+            df_tabela,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Resumo estatístico
+        st.markdown("**Resumo Estatístico:**")
+        col_stat1, col_stat2, col_stat3 = st.columns(3)
+        with col_stat1:
+            st.metric("Erro Médio Absoluto",
+                      f"{np.mean(np.abs(valores_previstos - medias)):.2f} μmol/m²/s")
+        with col_stat2:
+            st.metric("Erro Quadrático Médio",
+                      f"{np.mean((valores_previstos - medias)**2):.2f} (μmol/m²/s)²")
+        with col_stat3:
+            st.metric("Coef. Determinação (R²)",
+                      f"{reg['r2']:.4f}")
 
 
 def exibir_canal_detalhes(canal_nome, emoji, nome_display):
@@ -789,16 +1045,26 @@ def exibir_canal_detalhes(canal_nome, emoji, nome_display):
     col1, col2 = st.columns(2)
 
     with col1:
-        # Gráfico de intensidade
-        fig1 = go.Figure()
+        # Gráfico de intensidade (suavizado)
+        horas_suave, intens_suave = st.session_state.get(
+            'horas_suave', None), st.session_state.get('intens_suave', None)
+        if len(dados['hora_decimal']) < 200:
+            f = interp1d(dados['hora_decimal'],
+                         dados['Intensidade'], kind='cubic')
+            horas_suave = np.linspace(
+                min(dados['hora_decimal']), max(dados['hora_decimal']), 500)
+            intens_suave = f(horas_suave)
+        else:
+            horas_suave, intens_suave = dados['hora_decimal'], dados['Intensidade']
 
+        fig1 = go.Figure()
         fig1.add_trace(go.Scatter(
-            x=dados['hora_decimal'],
-            y=dados['Intensidade'],
+            x=horas_suave,
+            y=intens_suave,
             mode='lines',
             name='Intensidade',
             line=dict(color='red' if canal_nome == 'vermelho' else
-                      'blue' if canal_nome == 'azul' else 'gray', width=3),
+                      'blue' if canal_nome == 'azul' else 'gray', width=3, shape='spline'),
             fill='tozeroy',
             fillcolor='rgba(255,0,0,0.1)' if canal_nome == 'vermelho' else
             'rgba(0,0,255,0.1)' if canal_nome == 'azul' else 'rgba(128,128,128,0.1)',
@@ -809,23 +1075,28 @@ def exibir_canal_detalhes(canal_nome, emoji, nome_display):
             title=f'Intensidade - Canal {nome_display}',
             xaxis_title='Hora do Dia',
             yaxis_title='Intensidade (μmol/m²/s)',
-            height=400,
-            template='plotly_white'
+            height=400
         )
 
         st.plotly_chart(fig1, use_container_width=True)
 
     with col2:
-        # Gráfico da integral
-        fig2 = go.Figure()
+        # Gráfico da integral (suavizado)
+        if len(dados['hora_decimal']) < 200:
+            f = interp1d(dados['hora_decimal'],
+                         dados['Integral'], kind='cubic')
+            integral_suave = f(horas_suave)
+        else:
+            horas_suave, integral_suave = dados['hora_decimal'], dados['Integral']
 
+        fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
-            x=dados['hora_decimal'],
-            y=dados['Integral'],
+            x=horas_suave,
+            y=integral_suave,
             mode='lines',
             name='Integral',
             line=dict(color='red' if canal_nome == 'vermelho' else
-                      'blue' if canal_nome == 'azul' else 'gray', width=3),
+                      'blue' if canal_nome == 'azul' else 'gray', width=3, shape='spline'),
             hovertemplate='Hora: %{x:.2f}<br>Integral: %{y:.4f} mol/m²'
         ))
 
@@ -833,8 +1104,7 @@ def exibir_canal_detalhes(canal_nome, emoji, nome_display):
             title=f'Integral Acumulada (DLI) - Canal {nome_display}',
             xaxis_title='Hora do Dia',
             yaxis_title='Integral (mol/m²)',
-            height=400,
-            template='plotly_white'
+            height=400
         )
 
         st.plotly_chart(fig2, use_container_width=True)
@@ -842,15 +1112,22 @@ def exibir_canal_detalhes(canal_nome, emoji, nome_display):
     # Gráfico da distribuição gaussiana
     st.subheader(f"📊 Distribuição Gaussiana")
 
-    fig3 = go.Figure()
+    # Suavizar a gaussiana
+    if len(dados['x']) < 200:
+        f = interp1d(dados['x'], dados['Intensidade'], kind='cubic')
+        x_suave = np.linspace(min(dados['x']), max(dados['x']), 500)
+        intens_suave = f(x_suave)
+    else:
+        x_suave, intens_suave = dados['x'], dados['Intensidade']
 
+    fig3 = go.Figure()
     fig3.add_trace(go.Scatter(
-        x=dados['x'],
-        y=dados['Intensidade'],
+        x=x_suave,
+        y=intens_suave,
         mode='lines',
         name='Distribuição',
         line=dict(color='red' if canal_nome == 'vermelho' else
-                  'blue' if canal_nome == 'azul' else 'gray', width=3),
+                  'blue' if canal_nome == 'azul' else 'gray', width=3, shape='spline'),
         fill='tozeroy',
         fillcolor='rgba(255,0,0,0.1)' if canal_nome == 'vermelho' else
         'rgba(0,0,255,0.1)' if canal_nome == 'azul' else 'rgba(128,128,128,0.1)',
@@ -869,12 +1146,20 @@ def exibir_canal_detalhes(canal_nome, emoji, nome_display):
     fig3.add_vline(x=sigma_neg, line_dash="dot",
                    line_color="gray", opacity=0.7)
 
+    # Área entre ±σ
+    fig3.add_vrect(
+        x0=sigma_neg, x1=sigma_pos,
+        fillcolor="rgba(0, 100, 200, 0.1)",
+        line_width=0,
+        annotation_text="±σ (68%)",
+        annotation_position="top left"
+    )
+
     fig3.update_layout(
         title=f'Distribuição Gaussiana - {nome_display} (σ={params_gauss["sigma"]}, μ={params_gauss["mi"]})',
         xaxis_title='x (domínio normalizado)',
         yaxis_title='Intensidade (μmol/m²/s)',
-        height=400,
-        template='plotly_white'
+        height=400
     )
 
     st.plotly_chart(fig3, use_container_width=True)
@@ -1024,252 +1309,13 @@ def exibir_configurar_canais():
     ])
 
     fig.update_layout(
-        barmode='group',
         title='Intensidades por Canal',
+        barmode='group',
         yaxis_title='Intensidade (μmol/m²/s)',
-        height=400,
-        template='plotly_white'
+        height=400
     )
 
     st.plotly_chart(fig, use_container_width=True)
-
-
-def exibir_graficos_comparativos():
-    """Exibe gráficos comparativos entre os canais"""
-    st.header("📈 Gráficos Comparativos")
-
-    # Obter dados dos canais
-    dados_vermelho = sistema.get_dados_canal('vermelho')
-    dados_azul = sistema.get_dados_canal('azul')
-    dados_branco = sistema.get_dados_canal('branco')
-
-    # Gráfico 1: Intensidades comparadas
-    st.subheader("⚡ Intensidade dos Canais")
-
-    fig1 = go.Figure()
-
-    fig1.add_trace(go.Scatter(
-        x=dados_vermelho['hora_decimal'],
-        y=dados_vermelho['Intensidade'],
-        mode='lines',
-        name='Vermelho',
-        line=dict(color='red', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
-    ))
-
-    fig1.add_trace(go.Scatter(
-        x=dados_azul['hora_decimal'],
-        y=dados_azul['Intensidade'],
-        mode='lines',
-        name='Azul',
-        line=dict(color='blue', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
-    ))
-
-    fig1.add_trace(go.Scatter(
-        x=dados_branco['hora_decimal'],
-        y=dados_branco['Intensidade'],
-        mode='lines',
-        name='Branco',
-        line=dict(color='gray', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Intensidade: %{y:.2f} μmol/m²/s'
-    ))
-
-    fig1.update_layout(
-        title='Intensidade dos Canais ao Longo do Dia',
-        xaxis_title='Hora do Dia',
-        yaxis_title='Intensidade (μmol/m²/s)',
-        hovermode='x unified',
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="right", x=1),
-        template='plotly_white'
-    )
-
-    st.plotly_chart(fig1, use_container_width=True)
-
-    # Gráfico 2: Integrais comparadas
-    st.subheader("📊 Integral Acumulada (DLI)")
-
-    fig2 = go.Figure()
-
-    fig2.add_trace(go.Scatter(
-        x=dados_vermelho['hora_decimal'],
-        y=dados_vermelho['Integral'],
-        mode='lines',
-        name='Vermelho',
-        line=dict(color='red', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Integral: %{y:.4f} mol/m²'
-    ))
-
-    fig2.add_trace(go.Scatter(
-        x=dados_azul['hora_decimal'],
-        y=dados_azul['Integral'],
-        mode='lines',
-        name='Azul',
-        line=dict(color='blue', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Integral: %{y:.4f} mol/m²'
-    ))
-
-    fig2.add_trace(go.Scatter(
-        x=dados_branco['hora_decimal'],
-        y=dados_branco['Integral'],
-        mode='lines',
-        name='Branco',
-        line=dict(color='gray', width=2),
-        hovertemplate='Hora: %{x:.2f}<br>Integral: %{y:.4f} mol/m²'
-    ))
-
-    fig2.update_layout(
-        title='Integral de Luz Acumulada (DLI)',
-        xaxis_title='Hora do Dia',
-        yaxis_title='Integral (mol/m²)',
-        hovermode='x unified',
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom",
-                    y=1.02, xanchor="right", x=1),
-        template='plotly_white'
-    )
-
-    st.plotly_chart(fig2, use_container_width=True)
-
-    # Gráfico 3: DLIs finais comparados
-    st.subheader("📋 DLIs Finais por Canal")
-
-    dli_data = {
-        'Canal': ['Vermelho', 'Azul', 'Branco'],
-        'DLI Final (mol/m²)': [
-            dados_vermelho['DLI_final'],
-            dados_azul['DLI_final'],
-            dados_branco['DLI_final']
-        ],
-        'ICE (μmol/m²/s)': [
-            dados_vermelho['ICE'],
-            dados_azul['ICE'],
-            dados_branco['ICE']
-        ]
-    }
-
-    df_dli = pd.DataFrame(dli_data)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig3 = go.Figure(data=[
-            go.Bar(
-                x=df_dli['Canal'],
-                y=df_dli['DLI Final (mol/m²)'],
-                marker_color=['red', 'blue', 'gray'],
-                text=df_dli['DLI Final (mol/m²)'].round(3),
-                textposition='outside'
-            )
-        ])
-
-        fig3.update_layout(
-            title='DLI Final por Canal',
-            yaxis_title='DLI Final (mol/m²)',
-            height=400,
-            template='plotly_white'
-        )
-
-        st.plotly_chart(fig3, use_container_width=True)
-
-    with col2:
-        fig4 = go.Figure(data=[
-            go.Bar(
-                x=df_dli['Canal'],
-                y=df_dli['ICE (μmol/m²/s)'],
-                marker_color=['red', 'blue', 'gray'],
-                text=df_dli['ICE (μmol/m²/s)'].round(1),
-                textposition='outside'
-            )
-        ])
-
-        fig4.update_layout(
-            title='ICE por Canal',
-            yaxis_title='ICE (μmol/m²/s)',
-            height=400,
-            template='plotly_white'
-        )
-
-        st.plotly_chart(fig4, use_container_width=True)
-
-    # Tabela resumo
-    st.subheader("📊 Resumo dos Canais")
-    st.dataframe(df_dli, use_container_width=True)
-
-
-def exibir_exportar_dados():
-    """Exibe a interface para exportar dados"""
-    st.header("💾 Exportar Dados para Excel")
-
-    st.info("""
-    Clique no botão abaixo para gerar um arquivo Excel contendo todas as planilhas,
-    fiel à planilha original. O arquivo incluirá:
-    
-    - **bancada**: Dados de calibração e regressões lineares
-    - **canal_vermelho**: Dados do canal vermelho com gaussiana
-    - **canal_azul**: Dados do canal azul com gaussiana
-    - **canal_branco**: Dados do canal branco com gaussiana
-    - **configurar canais**: Configuração de proporções e dados combinados
-    """)
-
-    # Botão para exportar
-    if st.button("📥 Gerar Arquivo Excel Completo", type="primary", use_container_width=True):
-        with st.spinner("Gerando arquivo Excel..."):
-            excel_data = sistema.exportar_para_excel()
-
-            st.success("✅ Arquivo Excel gerado com sucesso!")
-
-            st.download_button(
-                label="⬇️ Baixar Arquivo Excel",
-                data=excel_data,
-                file_name="calibracao_bancadas_completa.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-
-    st.markdown("---")
-
-    # Pré-visualização dos dados
-    st.subheader("🔍 Pré-visualização dos Dados")
-
-    planilha_preview = st.selectbox(
-        "Selecione a planilha para pré-visualizar:",
-        ["bancada", "canal_vermelho", "canal_azul", "canal_branco"]
-    )
-
-    if planilha_preview == "bancada":
-        # Pré-visualização da bancada
-        st.write("**Dados da Bancada - Canal Azul**")
-
-        dados = st.session_state.dados_bancada['azul']['dados']
-        df_preview = pd.DataFrame(
-            dados,
-            columns=[f'Intensidade {i+1}' for i in range(5)],
-            index=[f'Repetição {i+1}' for i in range(5)]
-        )
-
-        st.dataframe(df_preview.style.format(
-            "{:.2f}"), use_container_width=True)
-
-    elif planilha_preview.startswith('canal_'):
-        canal_nome = planilha_preview.split('_')[1]
-        dados = sistema.get_dados_canal(canal_nome)
-
-        st.write(f"**{planilha_preview} - Primeiras 10 linhas**")
-
-        preview_data = []
-        for i in range(min(10, st.session_state.parametros_temporais['n_pontos'])):
-            preview_data.append({
-                'x': dados['x'][i],
-                'Hora': f"{dados['hora_decimal'][i]:.2f}",
-                'Intensidade': f"{dados['Intensidade'][i]:.2f}",
-                'Integral': f"{dados['Integral'][i]:.6f}"
-            })
-
-        st.dataframe(pd.DataFrame(preview_data), use_container_width=True)
 
 
 # Roteamento das abas
@@ -1278,6 +1324,9 @@ if aba_selecionada == "📊 Visão Geral":
 
 elif aba_selecionada == "🧪 Calibração Bancada":
     exibir_calibracao_bancada()
+
+elif aba_selecionada == "🔄 Configurar Canais":
+    exibir_configurar_canais()
 
 elif aba_selecionada == "🔴 Canal Vermelho":
     exibir_canal_detalhes('vermelho', '🔴', 'Vermelho')
@@ -1288,20 +1337,11 @@ elif aba_selecionada == "🔵 Canal Azul":
 elif aba_selecionada == "⚪ Canal Branco":
     exibir_canal_detalhes('branco', '⚪', 'Branco')
 
-elif aba_selecionada == "🔄 Configurar Canais":
-    exibir_configurar_canais()
-
-elif aba_selecionada == "📈 Gráficos Comparativos":
-    exibir_graficos_comparativos()
-
-elif aba_selecionada == "💾 Exportar Dados":
-    exibir_exportar_dados()
-
 # Rodapé
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: gray;'>"
-    "🔬 Sistema de Calibração de Bancadas | Desenvolvido para Laboratório de LAAC"
+    "<div style='text-align: center; color: #888; font-size: 0.9em;'>"
+    "🖥️ Sistema de Calibração de Bancadas | Desenvolvido para LAAC | v1.0"
     "</div>",
     unsafe_allow_html=True
 )
