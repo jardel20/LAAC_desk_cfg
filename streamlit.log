@@ -1,39 +1,35 @@
 
-Collecting usage statistics. To deactivate, set browser.gatherUsageStats to false.
-
-
   You can now view your Streamlit app in your browser.
 
   URL: http://0.0.0.0:8501
 
-2026-01-01 02:03:26.222 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.626 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-2026-01-01 02:03:26.274 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.635 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-2026-01-01 02:03:26.277 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.638 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-2026-01-01 02:03:36.938 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.655 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-2026-01-01 02:03:36.942 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.666 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-2026-01-01 02:03:36.945 Please replace `use_container_width` with `width`.
+2026-01-02 22:49:03.671 Please replace `use_container_width` with `width`.
 
 `use_container_width` will be removed after 2025-12-31.
 
 For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
-  Stopping...

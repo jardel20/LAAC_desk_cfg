@@ -1,18 +1,65 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
+import zipfile
 import io
+from datetime import datetime
 from scipy import stats
 from scipy.interpolate import interp1d
 from streamlit_echarts import st_echarts
+from man import exibir_manual_completo
 
 # Configurar página
+# Configuração básica da página
 st.set_page_config(
-    page_title="Sistema de Calibração de Bancadas LAAC - Spectral Int",
-    page_icon="",
+    page_title="LAAC - Sistema de Calibração",
+    page_icon="🖥️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Cabeçalho personalizado com CSS
+st.markdown("""
+    <style>
+    .main-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .main-header h1 {
+        color: white;
+        margin-bottom: 0.5rem;
+    }
+    .main-header p {
+        color: rgba(255, 255, 255, 0.9);
+        margin-bottom: 0;
+    }
+    .badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background-color: rgba(255, 255, 255, 0.2);
+        border-radius: 20px;
+        font-size: 0.8rem;
+        margin-right: 0.5rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Conteúdo do cabeçalho
+st.markdown("""
+    <div class="main-header">
+        <h1>🖥️ Sistema de Calibração de Bancadas LAAC</h1>
+        <p>Sistema integrado para calibração fotobiológica e geração de perfis de iluminação</p>
+        <div style="margin-top: 1rem;">
+            <span class="badge">Versão 1.0.0</span>
+            <span class="badge">Spectral Int</span>
+            <span class="badge">LAAC - UFV</span>
+        </div>
+    </div>
+""", unsafe_allow_html=True)
 
 
 class SistemaCalibracao:
@@ -84,10 +131,6 @@ class SistemaCalibracao:
         """Calcula a mediana dos dados"""
         return np.median(dados, axis=0)
 
-    def calcular_media(self, dados):
-        """Calcula a média dos dados"""
-        return np.mean(dados, axis=0)
-
     def calcular_regressao(self, x, y):
         """Calcula regressão linear"""
         if len(x) < 2 or len(y) < 2:
@@ -110,7 +153,7 @@ class SistemaCalibracao:
         for canal in ['azul', 'vermelho', 'branco']:
             dados = st.session_state.dados_bancada[canal]
             medianas = self.calcular_mediana(dados['dados'])
-            medias = self.calcular_media(dados['dados'])
+            medias = np.mean(dados['dados'], axis=0)
             x = dados['valores_referencia']
 
             regressao_mediana = self.calcular_regressao(x, medianas)
@@ -127,43 +170,138 @@ class SistemaCalibracao:
                 'regressao_mediana': regressao_mediana,
                 'regressao_media': regressao_media,
                 'valores_previstos_mediana': valores_previstos_mediana,
-                'valores_previstos_media': valores_previstos_media
+                'valores_previstos_media': valores_previstos_media,
+                # Adicionando limites da calibração
+                # Máximo medido na calibração
+                'limite_max_calibracao': np.max(medias),
+                # Mínimo medido na calibração
+                'limite_min_calibracao': np.min(medias)
             }
 
     def calcular_gaussiana(self, x, sigma, mi, intensidade_max, intensidade_min):
         """Calcula a distribuição gaussiana"""
         return intensidade_min + (intensidade_max - intensidade_min) * np.exp(-((x - mi)**2) / (2 * sigma**2))
 
+    def normalizar_para_ppfd(self, canal, valor_normalizado):
+        """Converte valor normalizado (0-1) para PPFD usando regressão da calibração"""
+        reg = self.regressoes[canal]['regressao_media']
+        return reg['a'] * valor_normalizado + reg['b']
+
+    def ppfd_para_normalizado(self, canal, ppfd):
+        """Converte PPFD para valor normalizado (0-1) usando regressão inversa"""
+        reg = self.regressoes[canal]['regressao_media']
+        if reg['a'] != 0:
+            return (ppfd - reg['b']) / reg['a']
+        return 0
+
+    def calcular_intensidade_canal(self, canal):
+        """Calcula intensidade máxima e mínima para um canal considerando calibração"""
+        params = st.session_state.parametros_canais
+
+        # Calcular proporções normalizadas
+        proporcoes = np.array([
+            params['proporcao_azul'],
+            params['proporcao_vermelho'],
+            params['proporcao_branco']
+        ])
+        proporcoes_norm = proporcoes / proporcoes.sum()
+
+        # Mapear canal para índice
+        canal_idx = {'azul': 0, 'vermelho': 1, 'branco': 2}[canal]
+        proporcao_canal = proporcoes_norm[canal_idx]
+
+        # Distribuir intensidades totais pelas proporções
+        intensidade_max_total = params['intensidade_max_total']
+        intensidade_min_total = params['intensidade_min_total']
+
+        intensidade_max_bruta = intensidade_max_total * proporcao_canal
+        intensidade_min_bruta = intensidade_min_total * proporcao_canal
+
+        # Obter limites da calibração para este canal
+        limite_max_calibracao = self.regressoes[canal]['limite_max_calibracao']
+        limite_min_calibracao = self.regressoes[canal]['limite_min_calibracao']
+
+        # Limitar as intensidades brutas pelos limites da calibração
+        # Se a intensidade calculada for maior que o máximo possível da calibração,
+        # ajustar para o máximo possível
+        if intensidade_max_bruta > limite_max_calibracao:
+            intensidade_max_bruta = limite_max_calibracao
+
+        # Se a intensidade calculada for menor que o mínimo possível da calibração,
+        # ajustar para o mínimo possível
+        if intensidade_min_bruta < limite_min_calibracao:
+            intensidade_min_bruta = limite_min_calibracao
+
+        # Ajustar mínimo para não ser maior que o máximo
+        if intensidade_min_bruta > intensidade_max_bruta:
+            intensidade_min_bruta = max(
+                limite_min_calibracao, intensidade_max_bruta * 0.1)
+
+        # Converter para valores normalizados usando a calibração
+        valor_max_normalizado = self.ppfd_para_normalizado(
+            canal, intensidade_max_bruta)
+        valor_min_normalizado = self.ppfd_para_normalizado(
+            canal, intensidade_min_bruta)
+
+        # Limitar aos limites da calibração (0-1)
+        valor_max_normalizado = max(0, min(1, valor_max_normalizado))
+        valor_min_normalizado = max(0, min(1, valor_min_normalizado))
+
+        # Converter de volta para PPFD usando a calibração
+        intensidade_max_calibrada = self.normalizar_para_ppfd(
+            canal, valor_max_normalizado)
+        intensidade_min_calibrada = self.normalizar_para_ppfd(
+            canal, valor_min_normalizado)
+
+        # Garantir que os valores finais respeitem os limites da calibração
+        intensidade_max_calibrada = min(
+            intensidade_max_calibrada, limite_max_calibracao)
+        intensidade_min_calibrada = max(
+            intensidade_min_calibrada, limite_min_calibracao)
+
+        # Garantir que mínimo não seja maior que máximo
+        if intensidade_min_calibrada > intensidade_max_calibrada:
+            intensidade_min_calibrada = intensidade_max_calibrada * 0.1
+
+        return intensidade_max_calibrada, intensidade_min_calibrada, valor_max_normalizado, valor_min_normalizado
+
     def gerar_dados_canal(self, canal, sigma, mi):
         """Gera dados para um canal específico"""
-        params = st.session_state.parametros_canais
+        # Calcular intensidades usando calibração
+        intensidade_max, intensidade_min, valor_max_norm, valor_min_norm = self.calcular_intensidade_canal(
+            canal)
+
         tempo = st.session_state.parametros_temporais
-
-        max_proporcao = max(
-            params['proporcao_azul'], params['proporcao_vermelho'], params['proporcao_branco'])
-
-        if canal == 'vermelho':
-            proporcao_norm = params['proporcao_vermelho'] / max_proporcao
-        elif canal == 'azul':
-            proporcao_norm = params['proporcao_azul'] / max_proporcao
-        else:
-            proporcao_norm = params['proporcao_branco'] / max_proporcao
-
-        soma_proporcoes = (params['proporcao_azul'] + params['proporcao_vermelho'] +
-                           params['proporcao_branco']) / max_proporcao
-
-        intensidade_max = params['intensidade_max_total'] / \
-            soma_proporcoes * proporcao_norm
-        intensidade_min = params['intensidade_min_total'] / \
-            soma_proporcoes * proporcao_norm
-
         n_pontos = tempo['n_pontos']
+
+        # Gerar gaussiana no domínio normalizado [-1, 1]
         x_vals = np.linspace(-1, 1, n_pontos)
+        gaussiana_norm = self.calcular_gaussiana(x_vals, sigma, mi, 1.0, 0.0)
+
+        # Normalizar gaussiana para [0, 1]
+        gauss_min = gaussiana_norm.min()
+        gauss_max = gaussiana_norm.max()
+        if gauss_max > gauss_min:
+            gaussiana_norm = (gaussiana_norm - gauss_min) / \
+                (gauss_max - gauss_min)
+
+        # Mapear para intervalo de operação [valor_min_norm, valor_max_norm]
+        range_norm = valor_max_norm - valor_min_norm
+        valores_norm = valor_min_norm + gaussiana_norm * range_norm
+
+        # Converter para PPFD usando calibração
+        intensidades = np.array(
+            [self.normalizar_para_ppfd(canal, val) for val in valores_norm])
+
+        # Garantir que as intensidades respeitem os limites da calibração
+        limite_max_calibracao = self.regressoes[canal]['limite_max_calibracao']
+        limite_min_calibracao = self.regressoes[canal]['limite_min_calibracao']
+        intensidades = np.clip(
+            intensidades, limite_min_calibracao, limite_max_calibracao)
+
+        # Gerar horários
         horas_decimais = np.linspace(
             tempo['hora_inicio'], tempo['hora_fim'], n_pontos)
-
-        intensidades = self.calcular_gaussiana(
-            x_vals, sigma, mi, intensidade_max, intensidade_min)
 
         if n_pontos < 50:
             x_interp = np.linspace(-1, 1, 200)
@@ -194,7 +332,9 @@ class SistemaCalibracao:
             'DLI_final': dli_final,
             'ICE': ice,
             'intensidade_max': intensidade_max,
-            'intensidade_min': intensidade_min
+            'intensidade_min': intensidade_min,
+            'limite_max_calibracao': limite_max_calibracao,
+            'limite_min_calibracao': limite_min_calibracao
         }
 
     def get_dados_canal(self, canal):
@@ -241,6 +381,27 @@ class SistemaCalibracao:
 
         return conteudo_arquivo
 
+    def gerar_conteudo_lamp_ice(self, dados, params_temp):
+        """Gera o conteúdo simplificado para arquivos LAMP com apenas ICE inicial e final"""
+        conteudo_arquivo = ""
+
+        # Obter ICE do canal (já calculado no sistema)
+        ice = dados['ICE']
+
+        # Converter ICE para inteiro
+        ice_int = int(round(ice))
+
+        # Linha 1: Horário de início con ICE
+        hora_inicio = params_temp['hora_inicio']
+        linha_inicio = f"{hora_inicio:02d} 00 00 {ice_int}\n"
+
+        # Linha 2: Horário de fim con ICE
+        hora_fim = params_temp['hora_fim']
+        linha_fim = f"{hora_fim:02d} 00 00 {ice_int}\n"
+
+        conteudo_arquivo = linha_inicio + linha_fim
+        return conteudo_arquivo
+
 # ============================================================================
 # CONFIGURAÇÕES ECHARTS
 # ============================================================================
@@ -263,7 +424,7 @@ COLORS = {
 # Configurações de tema padrão
 BASE_OPTIONS = {
     "animation": True,
-    "animationDuration": 1000,
+    "animationDuration": 600,
     "animationEasing": "cubicOut",
     "backgroundColor": "transparent",
     "textStyle": {
@@ -336,26 +497,89 @@ def apply_base_config(options):
             "containLabel": True
         }
 
+    # CToolbox con saveAsImage funcionando
     options["toolbox"] = {
         "feature": {
-            "dataZoom": {
-                "yAxisIndex": "none"
+            "dataView": {
+                "show": True,
+                "title": "Ver dados",
+                "readOnly": True,
+                "lang": ["Visualização", "Fechar", "Atualizar"]
             },
-            "restore": {},
-            "saveAsImage": {
-                "title": "Salvar imagem",
-                "pixelRatio": 2
-            }
+            "restore": {
+                "show": True,
+                "title": "Restaurar"
+            },
         },
-        "right": 20,
-        "top": 20
+        "right": 10,
+        "top": 10,
+        "orient": "vertical",
+        "itemSize": 18,
+        "itemGap": 8,
+        "showTitle": True
     }
+
+    # ANIMAÇÕES
+
+    # Habilita/desabilita animações globalmente
+    if "animation" not in options:
+        options["animation"] = True
+
+    # Duração total da animação em milissegundos
+    if "animationDuration" not in options:
+        options["animationDuration"] = 800
+
+    # Função de easing (aceleração/desaceleração) da animação
+    # Define a "curva de movimento" da animação
+    if "animationEasing" not in options:
+        # cubicInOut: começa devagar, acelera no meio, termina devagar
+        options["animationEasing"] = "cubicInOut"
+
+    # Limiar para ativar animações (em milissegundos)
+    # Si a mudança de dados for mais rápida que este valor, a animação é pulada
+    # Isso previne animações muito rápidas que podem ser irritantes
+    if "animationThreshold" not in options:
+        # Se a mudança levar menos de 800ms, sem animação
+        options["animationThreshold"] = 800
+
+    # Duração da animação para ATUALIZAÇÕES (não criação inicial)
+    # Útil quando os dados são atualizados dinamicamente
+    if "animationDurationUpdate" not in options:
+        # Para atualizações, usamos uma duração um pouco menor
+        options["animationDurationUpdate"] = 600
+
+    # Define se deve usar o tempo UTC (Tempo Universal Coordenado)
+    # True = UTC, False = fuso horário local
+    # Importante para gráficos temporais que precisam ser consistentes em diferentes fusos
+    # Garante que todos os horários são tratados em UTC
+    options["useUTC"] = True
+
+    # Aplica configurações individuais para cada série (linha/barra/ponto) no gráfico
+    # Isso permite customização específica por tipo de dados
+    if "series" in options:
+        for series in options["series"]:
+
+            # Habilita animação específica para esta série
+            # Mesmo que a animação global esteja ativa, uma série pode ter animação desabilitada
+            if "animation" not in series:
+                # Cada série terá sua própria animação
+                series["animation"] = True
+
+            # Duração da animação para esta série específica
+            # Pode ser diferente da duração global
+            if "animationDuration" not in series:
+                series["animationDuration"] = 800  # 800ms por série
+
+            # Função de easing específica para esta série
+            # Útil para criar efeitos em cascata ou diferentes comportamentos
+            if "animationEasing" not in series:
+                series["animationEasing"] = "cubicInOut"  # Padrão consistente
 
     return {**BASE_OPTIONS, **options}
 
 
 def criar_grafico_regressao(canal_nome, reg, x_ref, y_medido, y_previsto, cor):
-    """Cria gráfico de regressão linear PROFISSIONAL"""
+    """Cria gráfico de regressão linear"""
 
     # Preparar dados CORRETAMENTE para ECharts
     dados_medidos = [
@@ -433,7 +657,7 @@ def criar_grafico_regressao(canal_nome, reg, x_ref, y_medido, y_previsto, cor):
 def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_branco):
     """Cria gráfico comparativo das intensidades dos canais"""
 
-    # Preparar dados suavizados
+    # Preparar dados suavizados (código existente permanece igual)
     def preparar_dados_suavizados(dados):
         horas = np.array(dados['hora_decimal'])
         intens = np.array(dados['Intensidade'])
@@ -449,7 +673,7 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
     horas_a, intens_a = preparar_dados_suavizados(dados_azul)
     horas_b, intens_b = preparar_dados_suavizados(dados_branco)
 
-    # Calcular soma com horas comuns
+    # Calcular soma con horas comuns
     horas_min = max(min(horas_v), min(horas_a), min(horas_b))
     horas_max = min(max(horas_v), max(horas_a), max(horas_b))
     horas_comuns = np.linspace(horas_min, horas_max, 200)
@@ -461,30 +685,42 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
     soma_intensidades = intens_v_interp + intens_a_interp + intens_b_interp
 
     # DADOS PREPARADOS FORA do options (CRÍTICO)
-    dados_vermelho = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['vermelho']}}
-                      for h, i in zip(horas_v, intens_v)]
-    dados_azul = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['azul']}}
-                  for h, i in zip(horas_a, intens_a)]
-    dados_branco = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['branco']}}
-                    for h, i in zip(horas_b, intens_b)]
-    dados_soma = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['soma']}}
-                  for h, i in zip(horas_comuns, soma_intensidades)]
+    dados_vermelho_list = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['vermelho']}}
+                           for h, i in zip(horas_v, intens_v)]
+    dados_azul_list = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['azul']}}
+                       for h, i in zip(horas_a, intens_a)]
+    dados_branco_list = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['branco']}}
+                         for h, i in zip(horas_b, intens_b)]
+    dados_soma_list = [{"value": [float(h), float(round(i, 2))], "itemStyle": {"color": COLORS['soma']}}
+                       for h, i in zip(horas_comuns, soma_intensidades)]
 
     options = {
         "color": [COLORS['vermelho'], COLORS['azul'], COLORS['branco'], COLORS['soma']],
         "title": {
             "text": "Comparação de Intensidades por Canal",
-            "subtext": "Curvas suavizadas com interpolação cúbica",
+            "subtext": "Curvas suavizadas con interpolação cúbica",
             "left": "center",
-            "padding": [40, 0, 0, 0]
+            "padding": [0, 0, 0, 0]
         },
         "tooltip": {
             "trigger": "axis",
-            "axisPointer": {"type": "cross"}
+            "axisPointer": {"type": "cross"},
+            "backgroundColor": "rgba(255, 255, 255, 0.9)",
+            "borderColor": "#ccc",
+            "borderWidth": 1,
+            "textStyle": {
+                "color": "#333"
+            }
         },
         "legend": {
-            "top": "10%",
-            "type": "scroll"
+            "data": ["Vermelho", "Azul", "Branco", "Soma Total"],
+            "top": "bottom",
+            "left": "center",
+            "type": "scroll",
+            "padding": [50, 0, 0, 0],
+            "itemGap": 5,
+            "itemWidth": 25,
+            "itemHeight": 14
         },
         "xAxis": {
             "name": "Hora do Dia",
@@ -492,8 +728,8 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
             "nameGap": 25,
             "nameTextStyle": {"fontSize": 14, "fontWeight": "bold"},
             "type": "value",
-            "min": horas_min - 0.2,
-            "max": horas_max + 0.2,
+            "min": horas_min,
+            "max": horas_max,
             "axisLine": {"show": True, "lineStyle": {"color": "#333", "width": 1.5}},
             "axisLabel": {
                 "show": True,
@@ -521,9 +757,14 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
             {
                 "name": "Vermelho",
                 "type": "line",
-                "data": dados_vermelho,
-                "smooth": True,
-                "lineStyle": {"color": COLORS['vermelho'], "width": 2.5},
+                "data": dados_vermelho_list,
+                "smooth": 0.5,  # Suavização da linha
+                "lineStyle": {
+                    "color": COLORS['vermelho'],
+                    "width": 2.5,
+                    "shadowBlur": 0,
+                    "shadowColor": COLORS['vermelho'] + "40"
+                },
                 "showSymbol": False,
                 "areaStyle": {
                     "color": {
@@ -535,14 +776,30 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
                         ]
                     }
                 },
-                "emphasis": {"focus": "series"}
+                "emphasis": {
+                    "focus": "series",
+                    "lineStyle": {
+                        "width": 3.5,
+                        "shadowBlur": 0,
+                        "shadowColor": COLORS['vermelho'] + "60"
+                    }
+                },
+                "animation": True,
+                "animationDuration": 1000,
+                "animationEasing": "cubicInOut",
+                "animationDelay": 200  # Delay para animação em cascata
             },
             {
                 "name": "Azul",
                 "type": "line",
-                "data": dados_azul,
-                "smooth": True,
-                "lineStyle": {"color": COLORS['azul'], "width": 2.5},
+                "data": dados_azul_list,
+                "smooth": 0.5,
+                "lineStyle": {
+                    "color": COLORS['azul'],
+                    "width": 2.5,
+                    "shadowBlur": 0,
+                    "shadowColor": COLORS['azul'] + "40"
+                },
                 "showSymbol": False,
                 "areaStyle": {
                     "color": {
@@ -554,14 +811,23 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
                         ]
                     }
                 },
-                "emphasis": {"focus": "series"}
+                "emphasis": {"focus": "series"},
+                "animation": True,
+                "animationDuration": 1000,
+                "animationEasing": "cubicInOut",
+                "animationDelay": 200  # Delay para animação em cascata
             },
             {
                 "name": "Branco",
                 "type": "line",
-                "data": dados_branco,
-                "smooth": True,
-                "lineStyle": {"color": COLORS['branco'], "width": 2.5},
+                "data": dados_branco_list,
+                "smooth": 0.5,
+                "lineStyle": {
+                    "color": COLORS['branco'],
+                    "width": 2.5,
+                    "shadowBlur": 0,
+                    "shadowColor": COLORS['branco'] + "40"
+                },
                 "showSymbol": False,
                 "areaStyle": {
                     "color": {
@@ -573,16 +839,30 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
                         ]
                     }
                 },
-                "emphasis": {"focus": "series"}
+                "emphasis": {"focus": "series"},
+                "animation": True,
+                "animationDuration": 1000,
+                "animationEasing": "cubicInOut",
+                "animationDelay": 200  # Delay para animação em cascata
             },
             {
                 "name": "Soma Total",
                 "type": "line",
-                "data": dados_soma,
-                "smooth": True,
-                "lineStyle": {"color": COLORS['soma'], "width": 3.5, "type": "dashed"},
+                "data": dados_soma_list,
+                "smooth": 0.5,
+                "lineStyle": {
+                    "color": COLORS['soma'],
+                    "width": 3.5,
+                    "type": "dashed",
+                    "shadowBlur": 0,
+                    "shadowColor": COLORS['soma'] + "60"
+                },
                 "showSymbol": False,
-                "emphasis": {"focus": "series"}
+                "emphasis": {"focus": "series"},
+                "animation": True,
+                "animationDuration": 1000,
+                "animationEasing": "cubicInOut",
+                "animationDelay": 200  # Delay para animação em cascata
             }
         ],
         "dataZoom": [
@@ -595,15 +875,27 @@ def criar_grafico_comparacao_intensidades(dados_vermelho, dados_azul, dados_bran
                 "height": 20,
                 "borderColor": "transparent",
                 "handleStyle": {"color": COLORS['vermelho']},
-                "fillerColor": "rgba(84, 112, 198, 0.1)"
+                "fillerColor": "rgba(84, 112, 198, 0.1)",
+                "textStyle": {"color": "#666"}
             }
         ],
         "grid": {
-            "left": "5%",
-            "right": "5%",
+            "left": "3%",
+            "right": "0%",
             "bottom": "12%",
-            "top": 100,
+            "top": "15%",
             "containLabel": True
+        },
+        # Configurações de animação globais
+        "animation": True,
+        "animationDuration": 1200,
+        "animationDurationUpdate": 400,
+        "animationEasing": "cubicInOut",
+        "animationEasingUpdate": "cubicInOut",
+        "stateAnimation": {
+            "duration": 600,
+            "delay": 0,
+            "easing": "cubicInOut"
         }
     }
 
@@ -813,7 +1105,7 @@ def criar_grafico_barras_ice(ice_data):
 
 
 def criar_grafico_canal_detalhes(dados, canal_nome, cor, params_gauss):
-    """Cria gráfico detalhado de um canal"""
+    """Crea gráfico detalhado de um canal"""
     # Suavizar dados
     if len(dados['hora_decimal']) < 200:
         f = interp1d(dados['hora_decimal'], dados['Intensidade'], kind='cubic')
@@ -827,10 +1119,22 @@ def criar_grafico_canal_detalhes(dados, canal_nome, cor, params_gauss):
     hora_min = min(horas_suave)
     hora_max = max(horas_suave)
 
+    # Adicionar informações de limites da calibração ao subtítulo
+    subtexto = f"σ={params_gauss['sigma']:.2f}, μ={params_gauss['mi']:.2f} | "
+    subtexto += f"Máx: {dados['intensidade_max']:.1f} (Limite: {dados.get('limite_max_calibracao', 'N/A'):.1f}), "
+    subtexto += f"Mín: {dados['intensidade_min']:.1f} (Limite: {dados.get('limite_min_calibracao', 'N/A'):.1f}) μmol/m²/s"
+
     options = {
         "title": {
             "text": f"Intensidade - Canal {canal_nome.capitalize()}",
-            "subtext": f"σ={params_gauss['sigma']:.2f}, μ={params_gauss['mi']:.2f} | Máx: {dados['intensidade_max']:.1f}, Mín: {dados['intensidade_min']:.1f} μmol/m²/s"
+            "subtext": subtexto
+        },
+        "grid": {
+            "left": "60px",
+            "right": "95px",
+            "bottom": "60px",
+            "top": "60px",
+            "containLabel": True
         },
         "tooltip": {},
         "xAxis": {
@@ -908,28 +1212,54 @@ def criar_grafico_canal_detalhes(dados, canal_nome, cor, params_gauss):
                     "data": [
                         {
                             "yAxis": round(dados['intensidade_max'], 2),
-                            "name": "Máximo",
+                            "name": "Máximo Atual",
                             "lineStyle": {
                                 "color": cor,
                                 "type": "dashed",
                                 "width": 1
                             },
                             "label": {
-                                "formatter": "Máx: {c}",
+                                "formatter": "Máx. Atual: {c}",
                                 "position": "middle"
                             }
                         },
                         {
                             "yAxis": round(dados['intensidade_min'], 2),
-                            "name": "Mínimo",
+                            "name": "Mínimo Atual",
                             "lineStyle": {
                                 "color": cor,
                                 "type": "dashed",
                                 "width": 1
                             },
                             "label": {
-                                "formatter": "Mín: {c}",
+                                "formatter": "Mín. Atual: {c}",
                                 "position": "middle"
+                            }
+                        },
+                        {
+                            "yAxis": round(dados.get('limite_max_calibracao', dados['intensidade_max']), 2),
+                            "name": "Limite Máx Calibração",
+                            "lineStyle": {
+                                "color": "#ff0000",
+                                "type": "dotted",
+                                "width": 1
+                            },
+                            "label": {
+                                "formatter": "Lim. Máx: {c}",
+                                "position": "end"
+                            }
+                        },
+                        {
+                            "yAxis": round(dados.get('limite_min_calibracao', dados['intensidade_min']), 2),
+                            "name": "Limite Mín Calibração",
+                            "lineStyle": {
+                                "color": "#00aa00",
+                                "type": "dotted",
+                                "width": 1
+                            },
+                            "label": {
+                                "formatter": "Lim. Mín: {c}",
+                                "position": "end"
                             }
                         }
                     ]
@@ -960,16 +1290,21 @@ def criar_grafico_integral(dados, canal_nome, cor):
         horas_suave = dados['hora_decimal']
         integral_suave = dados['Integral']
 
+    hora_min = min(horas_suave)
+    hora_max = max(horas_suave)
+
     options = {
         "title": {
             "text": f"Integral Acumulada (DLI) - Canal {canal_nome.capitalize()}",
-            "subtext": f"DLI final: {dados['DLI_final']:.3f} mol/m² | ICE: {dados['ICE']:.1f} μmol/m²/s"
+            "subtext": f"DLI final: {dados['DLI_final']:.2f} mol/m² | ICE: {dados['ICE']:.2f} μmol/m²/s"
         },
         "tooltip": {},
         "xAxis": {
             "name": "Hora do Dia",
             "nameLocation": "middle",
             "nameGap": 25,
+            "min": hora_min,
+            "max": hora_max,
             "type": "value",
             "axisLabel": {
                 "formatter": """function(value) {
@@ -1075,8 +1410,6 @@ def criar_grafico_gaussiana(dados, canal_nome, cor, sigma, mi):
             "nameLocation": "middle",
             "nameGap": 25,
             "type": "value",
-            "min": min(-1.1, min(x_suave)*0.95),
-            "max": max(1.1, max(x_suave)*1.05),
             "axisLabel": {"formatter": "{value}"},
             "splitLine": {"show": True, "lineStyle": {"type": "dashed", "color": COLORS['grid']}}
         },
@@ -1085,15 +1418,13 @@ def criar_grafico_gaussiana(dados, canal_nome, cor, sigma, mi):
             "nameLocation": "middle",
             "nameGap": 45,
             "type": "value",
-            "min": 0,
-            "max": y_max * 1.15,
             "axisLabel": {"formatter": "{value}"}
         },
         "series": [
             {
                 "name": "Distribuição Gaussiana",
                 "type": "line",
-                "data": [[float(x), float(y)] for x, y in zip(x_suave, intens_suave)],
+                "data": [[float(round(x, 2)), float(round(y, 2))] for x, y in zip(x_suave, intens_suave)],
                 "smooth": True,
                 "lineStyle": {"color": cor, "width": 3},
                 "showSymbol": False,
@@ -1121,7 +1452,7 @@ def criar_grafico_gaussiana(dados, canal_nome, cor, sigma, mi):
             {
                 "name": f"Área ±σ ({sigma*100}%)",
                 "type": "line",
-                "data": [[float(x), float(y)] for x, y in zip(area_x, area_y)],
+                "data": [[float(round(x, 2)), float(round(y, 2))] for x, y in zip(area_x, area_y)],
                 "smooth": True,
                 "lineStyle": {"color": "#73c0de", "width": 0},
                 "areaStyle": {
@@ -1225,11 +1556,11 @@ def criar_grafico_comparacao_intensidades_barras(intensidades_max, intensidades_
                 "name": "Intensidade Mínima",
                 "type": "bar",
                 "data": [
-                    {"value": intensidades_min[0], "itemStyle": {
+                    {"value": float(round(intensidades_min[0], 2)), "itemStyle": {
                         "color": COLORS['azul'] + "80"}},
-                    {"value": intensidades_min[1], "itemStyle": {
+                    {"value": float(round(intensidades_min[1], 2)), "itemStyle": {
                         "color": COLORS['vermelho'] + "80"}},
-                    {"value": intensidades_min[2], "itemStyle": {
+                    {"value": float(round(intensidades_min[2], 2)), "itemStyle": {
                         "color": COLORS['branco'] + "80"}}
                 ],
                 "barWidth": "40%",
@@ -1265,60 +1596,37 @@ def criar_grafico_comparacao_intensidades_barras(intensidades_max, intensidades_
 # Inicializar sistema
 sistema = SistemaCalibracao()
 
-# Título principal
-st.title("🖥️ Sistema de Calibração de Bancadas")
-
-with st.expander("⚠️ INSTRUÇÕES IMPORTANTES", expanded=False):
-    st.info("""
-    **IMPORTANTE:**
-
-    1. **Ao trabalhar com duas bancadas:**
-       - Quando for escolher o range de PPFD que o experimento trabalhará, é preciso escolher:
-         - **O maior valor entre os dois mínimos** das bancadas de cada canal
-         - **O menor valor entre os dois máximos** das bancadas de cada canal
-    
-    2. **Configuração de arquivos LAMP_CH_X.txt:**
-       - Todos os canais (inclusive o quarto) devem iniciar e terminar no mesmo horário
-       - Isso evita que o equipamento ligue e desligue sem ativação configurada de dois dos três canais
-        - Legenda:
-            - LAMP_CH1.txt - Canal Vermelho
-            - LAMP_CH2.txt - Canal Azul  
-            - LAMP_CH3.txt - Canal Branco
-            - LAMP_CH4.txt - Cópia do Branco (mesmo conteúdo de LAMP_CH3.txt)
-        - Gerar arquivos LAMP gera arquivos de configuração LAMP, cada arquivo contém horários e intensidades calculadas para cada canal de LED
-    
-    3. **Atenção às proporções:**
-       - A proporção escolhida é entre canais físicos de LEDs
-       - **NÃO** é de banda espectral
-    """)
-
-st.markdown("---")
-
-# Barra lateral
 with st.sidebar:
     st.header("📜 Navegação")
 
+    # Navegação principal
     aba_selecionada = st.radio(
         "Selecione a seção:",
         ["📊 Visão Geral",
          "🧪 Calibração Bancada",
-         "🔄 Configurar Canais"],
+         "🎛️ Configurar Canais"],
         label_visibility="collapsed"
     )
 
-    st.markdown("---")
-
     if aba_selecionada != "🧪 Calibração Bancada":
-        st.header("⚙️ Configurações Rápidas")
+        st.header("⚙️ Configurações")
 
-        with st.expander("⏰ Horários", expanded=False):
-            hora_inicio = st.number_input("Hora Início", 0, 23,
-                                          st.session_state.parametros_temporais['hora_inicio'],
-                                          key="hora_inicio_sidebar")
-            hora_fim = st.number_input("Hora Fim", 0, 23,
-                                       st.session_state.parametros_temporais['hora_fim'],
-                                       key="hora_fim_sidebar")
-            n_pontos = st.slider("Nº de Pontos", 10, 500,
+        with st.expander("⏰ Horário", expanded=False):
+            # Colunas para hora início e fim lado a lado
+            col_hora1, col_hora2 = st.columns(2)
+
+            with col_hora1:
+                hora_inicio = st.number_input("Início", 0, 23,
+                                              st.session_state.parametros_temporais['hora_inicio'],
+                                              key="hora_inicio_sidebar")
+
+            with col_hora2:
+                hora_fim = st.number_input("Fim", 0, 23,
+                                           st.session_state.parametros_temporais['hora_fim'],
+                                           key="hora_fim_sidebar")
+
+            # Nº de pontos embaixo, ocupando largura total
+            n_pontos = st.slider("Nº de Pontos", 10, 60,
                                  st.session_state.parametros_temporais['n_pontos'],
                                  key="n_pontos_sidebar")
 
@@ -1368,14 +1676,16 @@ with st.sidebar:
                     'canal_azul': {'sigma': sigma_azul, 'mi': mi_azul},
                     'canal_branco': {'sigma': sigma_branco, 'mi': mi_branco}
                 })
+
+                # Incrementar contador para forçar animação
+                if 'animacao_counter' in st.session_state:
+                    st.session_state.animacao_counter += 1
+
                 st.rerun()
 
         # Seção para gerar arquivos LAMP
-        st.markdown("---")
-        st.header("💡 Gerar Arquivos LAMP")
 
-        with st.expander("📄 Arquivos", expanded=False):
-
+        with st.expander("📄 Gerar Arquivos", expanded=False):
             # Selecionar qual arquivo gerar
             arquivo_selecionado = st.selectbox(
                 "Selecione o arquivo:",
@@ -1397,13 +1707,13 @@ with st.sidebar:
 
             canal_nome = canal_map[arquivo_selecionado]
 
-            # ... (código anterior na barra lateral)
-
-            col1, col2 = st.columns(2)
+            # Colunas para os botões
+            col1, col2, col3 = st.columns(3)
 
             with col1:
-                # Botão para gerar arquivo individual
-                if st.button("⚡ Único", use_container_width=True):
+                # Botão para gerar arquivo individual con curva completa
+                if st.button("⚡ Curva", use_container_width=True,
+                             help="Gera arquivo con curva gaussiana completa (múltiplos pontos)"):
                     # Obter dados do canal
                     dados = sistema.get_dados_canal(canal_nome)
                     params_temp = st.session_state.parametros_temporais
@@ -1413,11 +1723,11 @@ with st.sidebar:
                         dados, params_temp)
 
                     # Nome do arquivo baseado na seleção
-                    nome_arquivo = arquivo_selecionado.split(" ")[0]
+                    nome_arquivo = arquivo_selecionado
 
                     # Criar download
                     st.download_button(
-                        label=f"⬇️ Baixar (TXT)",
+                        label=f"⬇️ Baixar TXT",
                         data=conteudo_arquivo,
                         file_name=nome_arquivo,
                         mime="text/plain",
@@ -1426,72 +1736,178 @@ with st.sidebar:
                     )
 
             with col2:
-                # Botão para gerar todos os arquivos
-                if st.button("📦 Todos", use_container_width=True):
-                    # Criar arquivo ZIP com todos os 4 arquivos
-                    import zipfile
-                    import io
+                # Botão para gerar arquivo simplificado con ICE
+                if st.button("📊 Linear", use_container_width=True,
+                             help="Gera arquivo con apenas início e fim con ICE (2 linhas)"):
+                    # Obter dados do canal
+                    dados = sistema.get_dados_canal(canal_nome)
+                    params_temp = st.session_state.parametros_temporais
+
+                    # Criar conteúdo simplificado con ICE
+                    conteudo_arquivo = sistema.gerar_conteudo_lamp_ice(
+                        dados, params_temp)
+
+                    # Nome do arquivo baseado na seleção (adiciona _ICE)
+                    nome_arquivo = arquivo_selecionado.replace(
+                        '.txt', '_ICE.txt')
+
+                    # Criar download
+                    st.download_button(
+                        label=f"⬇️ Baixar TXT",
+                        data=conteudo_arquivo,
+                        file_name=nome_arquivo,
+                        mime="text/plain",
+                        use_container_width=True,
+                        key=f"download_ice_{arquivo_selecionado.replace('.txt', '')}"
+                    )
+
+            with col3:
+                # Botão para gerar todos os arquivos (ambos os formatos)
+                if st.button("📦 Todos", use_container_width=True,
+                             help="Gera todos os arquivos em ambos formatos"):
+                    # Criar arquivo ZIP con todos os arquivos
 
                     buffer = io.BytesIO()
                     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                        # Gerar cada um dos 4 arquivos
+                        # Gerar cada um dos 4 arquivos em ambos formatos
                         arquivos_para_gerar = [
                             ("LAMP_CH1.txt", "vermelho"),
                             ("LAMP_CH2.txt", "azul"),
                             ("LAMP_CH3.txt", "branco"),
-                            ("LAMP_CH4.txt", "branco")  # Usa dados do branco
+                            ("LAMP_CH4.txt", "branco")
                         ]
 
+                        # Primeiro: arquivos con curva completa
                         for nome_arquivo, canal in arquivos_para_gerar:
                             dados = sistema.get_dados_canal(canal)
                             params_temp = st.session_state.parametros_temporais
-                            # Usar o método do sistema
                             conteudo = sistema.gerar_conteudo_lamp(
                                 dados, params_temp)
-                            zip_file.writestr(nome_arquivo, conteudo)
+                            zip_file.writestr(
+                                f"curva_completa/{nome_arquivo}", conteudo)
+
+                        # Segundo: arquivos con ICE simplificado
+                        for nome_arquivo, canal in arquivos_para_gerar:
+                            dados = sistema.get_dados_canal(canal)
+                            params_temp = st.session_state.parametros_temporais
+                            conteudo = sistema.gerar_conteudo_lamp_ice(
+                                dados, params_temp)
+                            nome_ice = nome_arquivo.replace('.txt', '_ICE.txt')
+                            zip_file.writestr(
+                                f"ice_simplificado/{nome_ice}", conteudo)
 
                         # Adicionar um arquivo README
                         readme_content = f"""
-                        ARQUIVOS DE CONFIGURAÇÃO LAMP
+                        ARQUIVOS DE CONFIGURAÇÃO LAMP - AMBOS FORMATOS
                         Gerado em: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
-                        
-                        Conteúdo:
-                        1. LAMP_CH1.txt - Canal Vermelho
-                        2. LAMP_CH2.txt - Canal Azul  
-                        3. LAMP_CH3.txt - Canal Branco
-                        4. LAMP_CH4.txt - Cópia do Branco (mesmo conteúdo de LAMP_CH3.txt)
-                        
+
+                        ESTRUTURA DO ZIP:
+                        ├── curva_completa/        - Arquivos con curva gaussiana completa
+                        │   ├── LAMP_CH1.txt      - Canal Vermelho (curva completa)
+                        │   ├── LAMP_CH2.txt      - Canal Azul (curva completa)
+                        │   ├── LAMP_CH3.txt      - Canal Branco (curva completa)
+                        │   └── LAMP_CH4.txt      - Cópia do Branco (curva completa)
+                        │
+                        └── ice_simplificado/     - Arquivos simplificados con ICE
+                            ├── LAMP_CH1_ICE.txt - Canal Vermelho (apenas ICE)
+                            ├── LAMP_CH2_ICE.txt - Canal Azul (apenas ICE)
+                            ├── LAMP_CH3_ICE.txt - Canal Branco (apenas ICE)
+                            └── LAMP_CH4_ICE.txt - Cópia do Branco (apenas ICE)
+
+                        VALORES DE ICE POR CANAL:
+                        - Vermelho: {sistema.get_dados_canal('vermelho')['ICE']:.1f} μmol/m²/s
+                        - Azul: {sistema.get_dados_canal('azul')['ICE']:.1f} μmol/m²/s
+                        - Branco: {sistema.get_dados_canal('branco')['ICE']:.1f} μmol/m²/s
+
                         Configurações utilizadas:
                         - Intensidade Total Máxima: {st.session_state.parametros_canais['intensidade_max_total']} μmol/m²/s
                         - Intensidade Total Mínima: {st.session_state.parametros_canais['intensidade_min_total']} μmol/m²/s
                         - Fotoperíodo: {st.session_state.parametros_temporais['hora_inicio']}:00 às {st.session_state.parametros_temporais['hora_fim']}:00
                         - Número de pontos: {st.session_state.parametros_temporais['n_pontos']}
-                        
-                        Formato dos arquivos:
+
+                        FORMATO DOS ARQUIVOS:
+
+                        1. Curva completa:
                         HH MM SS INTENSIDADE
+                        (Múltiplas linhas ao longo do fotoperíodo)
+
+                        2. ICE simplificado:
+                        HH_INICIO 00 00 ICE
+                        HH_FIM 00 00 ICE
+                        (Apenas 2 linhas: início e fim con valor de ICE)
                         """
                         zip_file.writestr("README.txt", readme_content)
+
+                        # Adicionar também um arquivo CSV con os ICEs
+                        ice_data = []
+                        for canal_nome, canal_display in [('vermelho', 'Vermelho'), ('azul', 'Azul'), ('branco', 'Branco')]:
+                            dados_canal = sistema.get_dados_canal(canal_nome)
+                            ice_data.append({
+                                'Canal': canal_display,
+                                'ICE_μmol_m2_s': round(dados_canal['ICE'], 1),
+                                'DLI_mol_m2': round(dados_canal['DLI_final'], 3),
+                                'Intensidade_Max': round(dados_canal['intensidade_max'], 1),
+                                'Intensidade_Min': round(dados_canal['intensidade_min'], 1)
+                            })
+
+                        df_ice = pd.DataFrame(ice_data)
+                        csv_ice = df_ice.to_csv(index=False)
+                        zip_file.writestr("valores_ice.csv", csv_ice)
 
                     buffer.seek(0)
 
                     # Criar download do ZIP
                     st.download_button(
-                        label="📥 Baixar (ZIP)",
+                        label="📥 Baixar ZIP",
                         data=buffer,
-                        file_name="lamp_config_files.zip",
+                        file_name="lamp_config_completo.zip",
                         mime="application/zip",
                         use_container_width=True,
-                        key="download_all_zip"
+                        key="download_all_formats_zip"
                     )
 
+            # Resumo dos ICEs (se gerado Todos)
+            with st.expander("👁️ Preview ICE e DLI", expanded=False):
+                for canal_nome, canal_display in [('vermelho', 'Vermelho'), ('azul', 'Azul'), ('branco', 'Branco')]:
+                    dados_canal = sistema.get_dados_canal(canal_nome)
+                    st.metric(
+                        f"ICE {canal_display}",
+                        f"{dados_canal['ICE']:.1f} μmol/m²/s",
+                        f"DLI: {dados_canal['DLI_final']:.1f} mol/m²")
+
             # Mostrar preview do arquivo selecionado
-            if st.button("👁️ Preview", use_container_width=True):
+            with st.expander("👁️ Preview Graussin", expanded=False):
                 dados = sistema.get_dados_canal(canal_nome)
                 params_temp = st.session_state.parametros_temporais
                 # Usar o método do sistema
                 conteudo_arquivo = sistema.gerar_conteudo_lamp(
                     dados, params_temp)
                 st.code(conteudo_arquivo, language="text")
+
+        # Botão de instruções completas
+        if st.button("Manual do Sistema",
+                     use_container_width=True,
+                     icon="📖",
+                     help="Instruções detalhadas do sistema",
+                     type="primary"):
+            st.session_state.show_full_manual = True
+
+# ============================================================================
+# MODAl DE AJUDA
+# ============================================================================
+
+# Inicializar estados dos modais
+if 'show_quick_help' not in st.session_state:
+    st.session_state.show_quick_help = False
+
+if 'show_full_manual' not in st.session_state:
+    st.session_state.show_full_manual = False
+
+# MANUAL COMPLETO
+if st.session_state.show_full_manual:
+    # Chamar o manual modularizado
+    exibir_manual_completo()
+
 
 # ============================================================================
 # FUNÇÕES PARA CADA ABA
@@ -1500,7 +1916,6 @@ with st.sidebar:
 
 def exibir_visao_geral():
     """Exibe a visão geral do sistema"""
-    st.header("📊 Visão Geral do Sistema")
 
     # Obter dados dos canais
     dados_vermelho = sistema.get_dados_canal('vermelho')
@@ -1539,8 +1954,6 @@ def exibir_visao_geral():
             delta=f"Mín: {params['intensidade_min_total']:.0f} μmol/m²/s"
         )
 
-    st.markdown("---")
-
     # Regressões lineares da bancada - LADO A LADO
     st.header("📐 Regressões Lineares da Bancada")
 
@@ -1560,7 +1973,9 @@ def exibir_visao_geral():
             # Criar gráfico ECharts
             options = criar_grafico_regressao(
                 canal_nome, reg, x_ref, y_medido, y_previsto, cor)
-            st_echarts(options=options, height=400, key=f"reg_{canal_nome}")
+            st_echarts(options=options, height=400, key=f"reg_{canal_nome}",
+                       renderer="canvas",
+                       theme="light")
 
             # Estatísticas da regressão
             st.markdown("**Estatísticas da Regressão:**")
@@ -1578,22 +1993,192 @@ def exibir_visao_geral():
             df_stats = pd.DataFrame(stats_data)
             st.dataframe(df_stats, hide_index=True, use_container_width=True)
 
-    st.markdown("---")
-
     # Gráficos Comparativos
     st.header("📈 Comparação entre Canais")
 
-    # Gráfico 1: Intensidades comparadas com soma
-    st.subheader("⚡ Intensidade dos Canais")
-
+    # Gráfico 1: Intensidades comparadas con soma - CORREÇÃO 1
     options_intensidades = criar_grafico_comparacao_intensidades(
         dados_vermelho, dados_azul, dados_branco)
+    # Corrigido: Adicionar apply_base_config
+    options_intensidades = apply_base_config(options_intensidades)
     st_echarts(options=options_intensidades, height=500,
                key="comparacao_intensidades")
 
-    # Gráfico 2: DLIs finais comparados
-    st.subheader("📊 Métricas de Luz por Canal")
+    # Criar abas para cada canal
+    tab1, tab2, tab3 = st.columns(3)
 
+    with tab1:
+        params_v = st.session_state.parametros_gaussianos['canal_vermelho']
+        dados_v = sistema.get_dados_canal('vermelho')
+
+        # Criar DataFrame com todos os pontos da gaussiana
+        df_gauss_v = pd.DataFrame({
+            'id': range(1, len(dados_v['x']) + 1),
+            'x_normalizado': dados_v['x'],
+            'hora_decimal': dados_v['hora_decimal'],
+            'hora_formato': [f"{int(h)}:{int((h-int(h))*60):02d}:{int(((h-int(h))*60 - int((h-int(h))*60))*60):02d}" for h in dados_v['hora_decimal']],
+            'intensidade_ppfd': dados_v['Intensidade'],
+            'integral_acumulada': dados_v['Integral']
+        })
+
+        # Adicionar informações de resumo
+        st.markdown(f"""
+        **Parâmetros da Distribuição:**
+        - σ (Sigma): `{params_v['sigma']:.3f}`
+        - μ (Mi): `{params_v['mi']:.3f}`
+        - Intensidade Máxima: `{dados_v['intensidade_max']:.1f}` μmol/m²/s
+        - Intensidade Mínima: `{dados_v['intensidade_min']:.1f}` μmol/m²/s
+        - Limite Máx Calibração: `{dados_v.get('limite_max_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - Limite Mín Calibração: `{dados_v.get('limite_min_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - ICE: `{dados_v['ICE']:.1f}` μmol/m²/s
+        - DLI Final: `{dados_v['DLI_final']:.3f}` mol/m²
+        """)
+
+        # Mostrar tabela con todos os pontos (limitado a 50 pontos para não ficar muito grande)
+        if len(df_gauss_v) > 50:
+            df_display_v = df_gauss_v.iloc[::len(df_gauss_v)//50]
+        else:
+            df_display_v = df_gauss_v
+
+        st.dataframe(
+            df_display_v,
+            column_config={
+                "x_normalizado": st.column_config.NumberColumn("x (normalizado)", format="%.3f"),
+                "hora_decimal": st.column_config.NumberColumn("Hora (decimal)", format="%.4f"),
+                "hora_formato": st.column_config.TextColumn("Hora (HH:MM:SS)"),
+                "intensidade_ppfd": st.column_config.NumberColumn("PPFD (μmol/m²/s)", format="%.1f"),
+                "integral_acumulada": st.column_config.NumberColumn("Integral (mol/m²)", format="%.6f")
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=400
+        )
+
+        # Botão para baixar dados completos
+        csv_v = df_gauss_v.to_csv(index=False)
+        st.download_button(
+            label="📥 Baixar dados completos (CSV)",
+            data=csv_v,
+            file_name="gaussiana_vermelho_completa.csv",
+            mime="text/csv",
+            key="download_v"
+        )
+
+    with tab2:
+        params_a = st.session_state.parametros_gaussianos['canal_azul']
+        dados_a = sistema.get_dados_canal('azul')
+
+        # Criar DataFrame com todos os pontos da gaussiana
+        df_gauss_a = pd.DataFrame({
+            'id': range(1, len(dados_a['x']) + 1),
+            'x_normalizado': dados_a['x'],
+            'hora_decimal': dados_a['hora_decimal'],
+            'hora_formato': [f"{int(h)}:{int((h-int(h))*60):02d}:{int(((h-int(h))*60 - int((h-int(h))*60))*60):02d}" for h in dados_a['hora_decimal']],
+            'intensidade_ppfd': dados_a['Intensidade'],
+            'integral_acumulada': dados_a['Integral']
+        })
+
+        # Adicionar informações de resumo
+        st.markdown(f"""
+        **Parâmetros da Distribuição:**
+        - σ (Sigma): `{params_a['sigma']:.3f}`
+        - μ (Mi): `{params_a['mi']:.3f}`
+        - Intensidade Máxima: `{dados_a['intensidade_max']:.1f}` μmol/m²/s
+        - Intensidade Mínima: `{dados_a['intensidade_min']:.1f}` μmol/m²/s
+        - Limite Máx Calibração: `{dados_a.get('limite_max_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - Limite Mín Calibração: `{dados_a.get('limite_min_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - ICE: `{dados_a['ICE']:.1f}` μmol/m²/s
+        - DLI Final: `{dados_a['DLI_final']:.3f}` mol/m²
+        """)
+
+        # Mostrar tabela con todos os pontos
+        if len(df_gauss_a) > 50:
+            df_display_a = df_gauss_a.iloc[::len(df_gauss_a)//50]
+        else:
+            df_display_a = df_gauss_a
+
+        st.dataframe(
+            df_display_a,
+            column_config={
+                "x_normalizado": st.column_config.NumberColumn("x (normalizado)", format="%.3f"),
+                "hora_decimal": st.column_config.NumberColumn("Hora (decimal)", format="%.4f"),
+                "hora_formato": st.column_config.TextColumn("Hora (HH:MM:SS)"),
+                "intensidade_ppfd": st.column_config.NumberColumn("PPFD (μmol/m²/s)", format="%.1f"),
+                "integral_acumulada": st.column_config.NumberColumn("Integral (mol/m²)", format="%.6f")
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=400
+        )
+
+        # Botão para baixar dados completos
+        csv_a = df_gauss_a.to_csv(index=False)
+        st.download_button(
+            label="📥 Baixar dados completos (CSV)",
+            data=csv_a,
+            file_name="gaussiana_azul_completa.csv",
+            mime="text/csv",
+            key="download_a"
+        )
+
+    with tab3:
+        params_b = st.session_state.parametros_gaussianos['canal_branco']
+        dados_b = sistema.get_dados_canal('branco')
+
+        # Criar DataFrame com todos os pontos da gaussiana
+        df_gauss_b = pd.DataFrame({
+            'id': range(1, len(dados_b['x']) + 1),
+            'x_normalizado': dados_b['x'],
+            'hora_decimal': dados_b['hora_decimal'],
+            'hora_formato': [f"{int(h)}:{int((h-int(h))*60):02d}:{int(((h-int(h))*60 - int((h-int(h))*60))*60):02d}" for h in dados_b['hora_decimal']],
+            'intensidade_ppfd': dados_b['Intensidade'],
+            'integral_acumulada': dados_b['Integral']
+        })
+
+        # Adicionar informações de resumo
+        st.markdown(f"""
+        **Parâmetros da Distribuição:**
+        - σ (Sigma): `{params_b['sigma']:.3f}`
+        - μ (Mi): `{params_b['mi']:.3f}`
+        - Intensidade Máxima: `{dados_b['intensidade_max']:.1f}` μmol/m²/s
+        - Intensidade Mínima: `{dados_b['intensidade_min']:.1f}` μmol/m²/s
+        - Limite Máx Calibração: `{dados_b.get('limite_max_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - Limite Mín Calibração: `{dados_b.get('limite_min_calibracao', 'N/A'):.1f}` μmol/m²/s
+        - ICE: `{dados_b['ICE']:.1f}` μmol/m²/s
+        - DLI Final: `{dados_b['DLI_final']:.3f}` mol/m²
+        """)
+
+        # Mostrar tabela con todos os pontos
+        if len(df_gauss_b) > 50:
+            df_display_b = df_gauss_b.iloc[::len(df_gauss_b)//50]
+        else:
+            df_display_b = df_gauss_b
+
+        st.dataframe(
+            df_display_b,
+            column_config={
+                "x_normalizado": st.column_config.NumberColumn("x (normalizado)", format="%.3f"),
+                "hora_decimal": st.column_config.NumberColumn("Hora (decimal)", format="%.4f"),
+                "hora_formato": st.column_config.TextColumn("Hora (HH:MM:SS)"),
+                "intensidade_ppfd": st.column_config.NumberColumn("PPFD (μmol/m²/s)", format="%.1f"),
+                "integral_acumulada": st.column_config.NumberColumn("Integral (mol/m²)", format="%.6f")
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=400
+        )
+
+        # Botão para baixar dados completos
+        csv_b = df_gauss_b.to_csv(index=False)
+        st.download_button(
+            label="📥 Baixar dados completos (CSV)",
+            data=csv_b,
+            file_name="gaussiana_branco_completa.csv",
+            mime="text/csv",
+            key="download_b"
+        )
+
+    # Gráfico 2: DLIs finais comparados
     dli_data = {
         'Canal': ['Vermelho', 'Azul', 'Branco', 'Total'],
         'DLI Final (mol/m²)': [
@@ -1611,35 +2196,116 @@ def exibir_visao_geral():
         ]
     }
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         options_dli = criar_grafico_barras_dli(dli_data)
-        st_echarts(options=options_dli, height=400, key="barras_dli")
+        st_echarts(options=options_dli, height=300, key="barras_dli")
 
     with col2:
         options_ice = criar_grafico_barras_ice(dli_data)
-        st_echarts(options=options_ice, height=400, key="barras_ice")
+        st_echarts(options=options_ice, height=300, key="barras_ice")
+
+    # Gráfico de Comparação de Intensidades por Canal
+    # Calcular intensidades por canal
+    with col3:
+        # Usar intensidades calculadas que respeitam a calibração
+        intensidades_max = [dados_azul['intensidade_max'],
+                            dados_vermelho['intensidade_max'],
+                            dados_branco['intensidade_max']]
+        intensidades_min = [dados_azul['intensidade_min'],
+                            dados_vermelho['intensidade_min'],
+                            dados_branco['intensidade_min']]
+
+        options_barras = criar_grafico_comparacao_intensidades_barras(
+            intensidades_max, intensidades_min)
+        st_echarts(options=options_barras, height=300,
+                   key="comparacao_intensidades_barras_visao_geral")
 
 
 def exibir_calibracao_bancada():
     """Exibe a interface de calibração da bancada"""
-    st.header("🧪 Calibração da Bancada")
 
     # Selecionar canal
     canal_selecionado = st.selectbox(
         "Selecione o canal para calibração:",
-        ["Azul", "Vermelho", "Branco"],
+        ["Vermelho", "Azul", "Branco"],
         key="canal_calibracao"
     )
 
     canal_key = canal_selecionado.lower()
     dados_canal = st.session_state.dados_bancada[canal_key]
 
-    st.subheader(f"📋 Entrada de Dados - Canal {canal_selecionado}")
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        with st.container():
+            reg = sistema.regressoes[canal_key]['regressao_media']
+            medias = sistema.regressoes[canal_key]['medias']
+
+            cols = st.columns(5)
+            metrics = [
+                ("Média Máx", f"{max(medias):.1f}", "μmol/m²/s"),
+                ("Média Mín", f"{min(medias):.1f}", "μmol/m²/s"),
+                ("Intercepto", f"{reg['a']:.4f}", ""),
+                ("Inclinação", f"{reg['b']:.1f}", ""),
+                ("R²", f"{reg['r2']:.4f}", "")
+            ]
+
+            for i, (label, value, unit) in enumerate(metrics):
+                with cols[i]:
+                    st.metric(label, value, delta=unit if unit else None)
+
+    with col2:
+        if st.button(icon="🔄", label="Restaurar Valores Padrão",
+                     key=f"reset_button_{canal_key}",
+                     help="Restaura os valores padrão de calibração para este canal"):
+            # Restaurar valores padrão EXATOS para cada canal
+            if canal_key == 'azul':
+                default_data = np.array([
+                    [24.86, 29.3, 27.6, 22.53, 29.51],
+                    [76.45, 74.32, 73.75, 58.78, 66.12],
+                    [114.8, 106.9, 114.6, 102.9, 100.9],
+                    [135.5, 127.1, 138.0, 120.2, 119.8],
+                    [175.7, 177.0, 164.1, 145.0, 170.0]
+                ]).T
+                default_ref = np.array([0, 0.3, 0.5, 0.7, 1.0])
+            elif canal_key == 'vermelho':
+                default_data = np.array([
+                    [58.12, 57.3, 54.3, 55.9, 52.0],
+                    [143.9, 168.3, 160.4, 147.6, 158.1],
+                    [235.3, 227.2, 198.0, 233.5, 224.5],
+                    [279.5, 293.3, 272.2, 302.7, 281.7],
+                    [360.5, 354.2, 407.3, 398.5, 367.8]
+                ]).T
+                default_ref = np.array([0, 0.3, 0.5, 0.7, 1.0])
+            else:  # branco
+                default_data = np.array([
+                    [20.61, 24.51, 24.24, 22.42, 23.14],
+                    [62.13, 67.69, 58.93, 59.12, 55.09],
+                    [69.18, 92.19, 91.02, 86.68, 84.73],
+                    [109.8, 104.6, 117.0, 113.7, 110.3],
+                    [120.8, 150.9, 143.3, 130.7, 143.9]
+                ]).T
+                default_ref = np.array([0, 0.3, 0.5, 0.7, 1.0])
+
+            st.session_state.dados_bancada[canal_key]['dados'] = default_data
+            st.session_state.dados_bancada[canal_key]['valores_referencia'] = default_ref
+
+            sistema.calcular_regressoes()
+
+            st.success(
+                f"✅ Valores padrão restaurados para {canal_key.capitalize()}!")
+            st.rerun()
+
+        # Exibir mensagem de confirmação se acabou de restaurar
+        if st.session_state.get(f'restaurado_{canal_key}', False):
+            st.info(
+                f"Valores padrão do canal {canal_key.capitalize()} foram restaurados.")
+            st.session_state[f'restaurado_{canal_key}'] = False
 
     # Interface de entrada de dados
-    col1, col2 = st.columns([3, 1])
+    col1, col2 = st.columns([2, 2])
 
     with col1:
         st.markdown("**Valores de Referência:**")
@@ -1647,16 +2313,19 @@ def exibir_calibracao_bancada():
 
         grid_container = st.container()
         with grid_container:
-            cols = st.columns(6)
+            cols = st.columns(6, width=800)
             with cols[0]:
-                st.markdown("**Repetição**")
+                st.markdown("**Repetição**", unsafe_allow_html=True,
+                            text_alignment="center")
             for i in range(5):
                 with cols[i+1]:
                     st.markdown(
-                        f"**Intensidade {i+1}**<br>(Ref: {ref_vals[i]})", unsafe_allow_html=True)
+                        f"**Intensidade**</br>{ref_vals[i]*100}%</br>",
+                        unsafe_allow_html=True,
+                        text_alignment="center")
 
             for rep in range(5):
-                cols = st.columns(6)
+                cols = st.columns(6, width=800)
                 with cols[0]:
                     st.markdown(f"**Repetição {rep+1}**")
                 for intens in range(5):
@@ -1676,405 +2345,293 @@ def exibir_calibracao_bancada():
                             dados_canal['dados'][rep, intens] = valor
                             sistema.calcular_regressoes()
 
-    with col2:
-        st.subheader("📊 Estatísticas")
-        reg = sistema.regressoes[canal_key]['regressao_media']
-        medias = sistema.regressoes[canal_key]['medias']
-
-        st.metric("Média Máxima", f"{max(medias):.2f}")
-        st.metric("Média Mínima", f"{min(medias):.2f}")
-        st.metric("Coef. Angular (a)", f"{reg['a']:.4f}")
-        st.metric("Coef. Linear (b)", f"{reg['b']:.4f}")
-        st.metric("R²", f"{reg['r2']:.4f}")
-
-        if st.button("🔄 Restaurar Valores Padrão", key="reset_button"):
-            # Restaurar valores padrão
-            if canal_key == 'azul':
-                default_data = np.array([
-                    [24.86, 29.3, 27.6, 22.53, 29.51],
-                    [76.45, 74.32, 73.75, 58.78, 66.12],
-                    [114.8, 106.9, 114.6, 102.9, 100.9],
-                    [135.5, 127.1, 138.0, 120.2, 119.8],
-                    [175.7, 177.0, 164.1, 145.0, 170.0]
-                ]).T
-            elif canal_key == 'vermelho':
-                default_data = np.array([
-                    [58.12, 57.3, 54.3, 55.9, 52.0],
-                    [143.9, 168.3, 160.4, 147.6, 158.1],
-                    [235.3, 227.2, 198.0, 233.5, 224.5],
-                    [279.5, 293.3, 272.2, 302.7, 281.7],
-                    [360.5, 354.2, 407.3, 398.5, 367.8]
-                ]).T
-            else:
-                default_data = np.array([
-                    [20.61, 24.51, 24.24, 22.42, 23.14],
-                    [62.13, 67.69, 58.93, 59.12, 55.09],
-                    [69.18, 92.19, 91.02, 86.68, 84.73],
-                    [109.8, 104.6, 117.0, 113.7, 110.3],
-                    [120.8, 150.9, 143.3, 130.7, 143.9]
-                ]).T
-
-            st.session_state.dados_bancada[canal_key]['dados'] = default_data
-            sistema.calcular_regressoes()
-            st.success(
-                f"Valores padrão restaurados para o canal {canal_selecionado}!")
-            st.rerun()
-
-    # Visualização gráfica
-    st.subheader("📈 Visualização em Tempo Real")
-
     # Criar gráfico ECharts para regressão
-    reg = sistema.regressoes[canal_key]
-    x_ref = st.session_state.dados_bancada[canal_key]['valores_referencia']
+    with col2:
+        reg = sistema.regressoes[canal_key]
+        x_ref = st.session_state.dados_bancada[canal_key]['valores_referencia']
 
-    # Preparar dados para o gráfico
-    series_data = []
+        # Preparar dados para o gráfico
+        series_data = []
 
-    # Adicionar repetições
-    for rep in range(5):
+        # Adicionar repetições
+        for rep in range(5):
+            series_data.append({
+                "name": f'Repetição {rep+1}',
+                "type": "scatter",
+                "data": [[float(x_ref[i]), float(dados_canal['dados'][rep, i])] for i in range(5)],
+                "symbolSize": 8,
+                "itemStyle": {
+                    "color": f'rgba({100 + rep * 30}, {100 + rep * 30}, {100 + rep * 30}, 0.7)'
+                }
+            })
+
+        # Adicionar média
+        medias = sistema.regressoes[canal_key]['medias']
         series_data.append({
-            "name": f'Repetição {rep+1}',
-            "type": "scatter",
-            "data": [[float(x_ref[i]), float(dados_canal['dados'][rep, i])] for i in range(5)],
-            "symbolSize": 8,
+            "name": 'Média',
+            "type": "line",
+            "data": [[float(round(x_ref[i], 1)), float(round(medias[i], 1))] for i in range(5)],
+            "lineStyle": {
+                "color": COLORS["soma"],
+                "width": 3
+            },
+            "symbol": "circle",
+            "symbolSize": 12,
             "itemStyle": {
-                "color": f'rgba({100 + rep * 30}, {100 + rep * 30}, {100 + rep * 30}, 0.7)'
+                "color": COLORS["soma"]
             }
         })
 
-    # Adicionar média
-    medias = sistema.regressoes[canal_key]['medias']
-    series_data.append({
-        "name": 'Média',
-        "type": "line",
-        "data": [[float(x_ref[i]), float(medias[i])] for i in range(5)],
-        "lineStyle": {
-            "color": COLORS["soma"],
-            "width": 3
-        },
-        "symbol": "circle",
-        "symbolSize": 12,
-        "itemStyle": {
-            "color": COLORS["soma"]
+        # Adicionar regressão
+        y_previsto = sistema.regressoes[canal_key]['valores_previstos_media']
+        series_data.append({
+            "name": 'Regressão (média)',
+            "type": "line",
+            "data": [[float(x_ref[i]), float(y_previsto[i])] for i in range(5)],
+            "lineStyle": {
+                "color": COLORS['vermelho'] if canal_key == 'vermelho' else COLORS['azul'] if canal_key == 'azul' else COLORS['branco'],
+                "width": 2,
+                "type": "dashed"
+            },
+            "smooth": True,
+            "showSymbol": False
+        })
+
+        options = {
+            "title": {
+                "text": f'Regressão Linear - Canal {canal_selecionado}',
+                "left": "center"
+            },
+            "tooltip": {},
+            "legend": {
+                "data": [f'Repetição {i+1}' for i in range(5)] + ['Média', 'Regressão (média)'],
+                "top": "10%",
+                "type": "scroll"
+            },
+            "xAxis": {
+                "name": "Valor de Referência",
+                "nameLocation": "middle",
+                "nameGap": 30,
+                "type": "value"
+            },
+            "yAxis": {
+                "name": "PPFD Medido (μmol/m²/s)",
+                "nameLocation": "middle",
+                "nameGap": 50,
+                "type": "value"
+            },
+            "series": series_data,
+            "grid": {
+                "left": "15%",
+                "right": "10%",
+                "bottom": "20%",
+                "top": "20%"
+            }
         }
-    })
 
-    # Adicionar regressão
-    y_previsto = sistema.regressoes[canal_key]['valores_previstos_media']
-    series_data.append({
-        "name": 'Regressão (média)',
-        "type": "line",
-        "data": [[float(x_ref[i]), float(y_previsto[i])] for i in range(5)],
-        "lineStyle": {
-            "color": COLORS['vermelho'] if canal_key == 'vermelho' else COLORS['azul'] if canal_key == 'azul' else COLORS['branco'],
-            "width": 2,
-            "type": "dashed"
-        },
-        "smooth": True,
-        "showSymbol": False
-    })
-
-    options = {
-        "title": {
-            "text": f'Regressão Linear - Canal {canal_selecionado}',
-            "left": "center"
-        },
-        "tooltip": {},
-        "legend": {
-            "data": [f'Repetição {i+1}' for i in range(5)] + ['Média', 'Regressão (média)'],
-            "top": "10%",
-            "type": "scroll"
-        },
-        "xAxis": {
-            "name": "Valor de Referência",
-            "nameLocation": "middle",
-            "nameGap": 30,
-            "type": "value",
-            "min": -0.1,
-            "max": 1.1
-        },
-        "yAxis": {
-            "name": "PPFD Medido (μmol/m²/s)",
-            "nameLocation": "middle",
-            "nameGap": 50,
-            "type": "value"
-        },
-        "series": series_data,
-        "grid": {
-            "left": "15%",
-            "right": "10%",
-            "bottom": "20%",
-            "top": "20%"
-        }
-    }
-
-    st_echarts(options=options, height=500, key="calibracao_grafico")
-
-
-def exibir_canal_detalhes(canal_nome, emoji, nome_display):
-    """Exibe detalhes de um canal específico"""
-    st.header(f"{emoji} Canal {nome_display}")
-
-    # Obter dados do canal
-    dados = sistema.get_dados_canal(canal_nome)
-    params_gauss = st.session_state.parametros_gaussianos[f'canal_{canal_nome}']
-    params_temp = st.session_state.parametros_temporais
-
-    # Métricas principais
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("Intensidade Máx",
-                  f"{dados['intensidade_max']:.1f} μmol/m²/s")
-        st.metric("Hora Início", f"{params_temp['hora_inicio']:02d}:00")
-
-    with col2:
-        st.metric("Intensidade Mín",
-                  f"{dados['intensidade_min']:.1f} μmol/m²/s")
-        st.metric("Hora Fim", f"{params_temp['hora_fim']:02d}:00")
-
-    with col3:
-        st.metric("DLI Final", f"{dados['DLI_final']:.3f} mol/m²")
-        st.metric("Fotoperíodo",
-                  f"{params_temp['hora_fim'] - params_temp['hora_inicio']}h")
-
-    with col4:
-        st.metric("ICE", f"{dados['ICE']:.2f} μmol/m²/s")
-        st.metric("Nº Pontos", params_temp['n_pontos'])
-
-    st.markdown("---")
-
-    # Gráficos
-    col1, col2 = st.columns(2)
-
-    with col1:
-        # Gráfico de intensidade
-        cor = COLORS['vermelho'] if canal_nome == 'vermelho' else COLORS['azul'] if canal_nome == 'azul' else COLORS['branco']
-        options_intensidade = criar_grafico_canal_detalhes(
-            dados, canal_nome, cor, params_gauss)
-        st_echarts(options=options_intensidade, height=400,
-                   key=f"intensidade_{canal_nome}")
-
-    with col2:
-        # Gráfico da integral
-        options_integral = criar_grafico_integral(dados, canal_nome, cor)
-        st_echarts(options=options_integral, height=400,
-                   key=f"integral_{canal_nome}")
-
-    # Gráfico da distribuição gaussiana
-    st.subheader(f"📊 Distribuição Gaussiana")
-    options_gaussiana = criar_grafico_gaussiana(
-        dados, canal_nome, cor, params_gauss['sigma'], params_gauss['mi'])
-    st_echarts(options=options_gaussiana, height=400,
-               key=f"gaussiana_{canal_nome}")
+        st_echarts(options=options, height=500, key="calibracao_grafico",
+                   renderer="canvas",  # FORÇAR canvas
+                   theme="light")
 
 
 def exibir_configurar_canais():
     """Exibe a interface para configurar os canais"""
-    st.header("🔄 Configurar Canais")
 
-    st.info("""
-    **Atenção:** A proporção escolhida aqui é entre canais físicos de LEDs, 
-    **NÃO** é de banda espectral.
-    """)
+    # Inicializar estado da visualização se não existir
+    if 'canal_configuracao_atual' not in st.session_state:
+        st.session_state.canal_configuracao_atual = "Vermelho"
+
+    if 'ultima_atualizacao_config' not in st.session_state:
+        st.session_state.ultima_atualizacao_config = {
+            'proporcoes': (1.0, 1.0, 1.0),
+            'gaussianas': (0.3, 0.3, 0.3, 0.5, -0.5, 0.0),
+            'intensidades': (650.0, 120.0)
+        }
 
     # Formulário de configuração
-    col1, col2 = st.columns(2)
+    col3, col2, col1 = st.columns([1, 2, 2])
 
     with col1:
         st.subheader("⚡ Intensidades Totais")
-        intensidade_max_total = st.number_input(
-            "Intensidade Total Máxima (μmol/m²/s)",
-            min_value=0.0,
-            max_value=2000.0,
-            value=st.session_state.parametros_canais['intensidade_max_total'],
-            step=10.0,
-            key="int_max_total"
-        )
-        intensidade_min_total = st.number_input(
-            "Intensidade Total Mínima (μmol/m²/s)",
-            min_value=0.0,
-            max_value=1000.0,
-            value=st.session_state.parametros_canais['intensidade_min_total'],
-            step=10.0,
-            key="int_min_total"
-        )
+
+        # Criar 2 colunas para os inputs lado a lado
+        col_max, col_min = st.columns(2)
+
+        with col_max:
+            intensidade_max_total = st.number_input(
+                "Máx. Total (μmol/m²/s)",
+                min_value=0.0,
+                max_value=2000.0,
+                value=st.session_state.parametros_canais['intensidade_max_total'],
+                step=10.0,
+                key="int_max_total_config",
+                help="Intensidade máxima total combinada dos canais"
+            )
+
+        with col_min:
+            intensidade_min_total = st.number_input(
+                "Mín. Total (μmol/m²/s)",
+                min_value=0.0,
+                max_value=1000.0,
+                value=st.session_state.parametros_canais['intensidade_min_total'],
+                step=10.0,
+                key="int_min_total_config",
+                help="Intensidade mínima total combinada dos canais"
+            )
 
     with col2:
         st.subheader("📊 Proporções entre Canais")
-        proporcao_azul = st.slider(
-            "Proporção Azul",
-            min_value=0.0,
-            max_value=5.0,
-            value=st.session_state.parametros_canais['proporcao_azul'],
-            step=0.1,
-            key="prop_azul"
-        )
-        proporcao_vermelho = st.slider(
-            "Proporção Vermelho",
-            min_value=0.0,
-            max_value=5.0,
-            value=st.session_state.parametros_canais['proporcao_vermelho'],
-            step=0.1,
-            key="prop_vermelho"
-        )
-        proporcao_branco = st.slider(
-            "Proporção Branco",
-            min_value=0.0,
-            max_value=5.0,
-            value=st.session_state.parametros_canais['proporcao_branco'],
-            step=0.1,
-            key="prop_branco"
-        )
 
-    # Atualizar parâmetros em tempo real
-    if (intensidade_max_total != st.session_state.parametros_canais['intensidade_max_total'] or
-        intensidade_min_total != st.session_state.parametros_canais['intensidade_min_total'] or
-        proporcao_azul != st.session_state.parametros_canais['proporcao_azul'] or
-        proporcao_vermelho != st.session_state.parametros_canais['proporcao_vermelho'] or
-            proporcao_branco != st.session_state.parametros_canais['proporcao_branco']):
+        # Number inputs con valores inteiros de 1 a 5
+        col_slider1, col_slider2, col_slider3 = st.columns(3)
 
+        with col_slider1:
+            proporcao_azul = st.number_input(
+                "Azul",
+                min_value=1,
+                max_value=5,
+                value=int(
+                    st.session_state.parametros_canais['proporcao_azul']),
+                step=1,
+                key="prop_azul_config",
+                help="Proporção do canal Azul (1 a 5)"
+            )
+
+        with col_slider2:
+            proporcao_vermelho = st.number_input(
+                "Vermelho",
+                min_value=1,
+                max_value=5,
+                value=int(
+                    st.session_state.parametros_canais['proporcao_vermelho']),
+                step=1,
+                key="prop_vermelho_config",
+                help="Proporção do canal Vermelho (1 a 5)"
+            )
+
+        with col_slider3:
+            proporcao_branco = st.number_input(
+                "Branco",
+                min_value=1,
+                max_value=5,
+                value=int(
+                    st.session_state.parametros_canais['proporcao_branco']),
+                step=1,
+                key="prop_branco_config",
+                help="Proporção do canal Branco (1 a 5)"
+            )
+
+    # Verificar se houve mudanças nos parâmetros
+    mudancas_detectadas = False
+    proporcoes_atual = (
+        float(proporcao_azul),
+        float(proporcao_vermelho),
+        float(proporcao_branco)
+    )
+    proporcoes_anterior = st.session_state.ultima_atualizacao_config['proporcoes']
+
+    intensidades_atual = (intensidade_max_total, intensidade_min_total)
+    intensidades_anterior = st.session_state.ultima_atualizacao_config['intensidades']
+
+    # Verificar se houve mudanças
+    if (proporcoes_atual != proporcoes_anterior or
+            intensidades_atual != intensidades_anterior):
+        mudancas_detectadas = True
+        st.session_state.ultima_atualizacao_config.update({
+            'proporcoes': proporcoes_atual,
+            'intensidades': intensidades_atual
+        })
+
+    # Atualizar parâmetros somente se houver mudanças
+    if mudancas_detectadas:
         st.session_state.parametros_canais.update({
             'intensidade_max_total': intensidade_max_total,
             'intensidade_min_total': intensidade_min_total,
-            'proporcao_azul': proporcao_azul,
-            'proporcao_vermelho': proporcao_vermelho,
-            'proporcao_branco': proporcao_branco
+            'proporcao_azul': float(proporcao_azul),
+            'proporcao_vermelho': float(proporcao_vermelho),
+            'proporcao_branco': float(proporcao_branco)
         })
 
-    st.markdown("---")
-
-    # Resultados da configuração
-    st.header("📊 Resultados da Configuração")
-
-    # Calcular intensidades por canal
-    max_proporcao = max(proporcao_azul, proporcao_vermelho, proporcao_branco)
-    proporcao_azul_norm = proporcao_azul / max_proporcao
-    proporcao_vermelho_norm = proporcao_vermelho / max_proporcao
-    proporcao_branco_norm = proporcao_branco / max_proporcao
-
-    soma_proporcoes = proporcao_azul_norm + \
-        proporcao_vermelho_norm + proporcao_branco_norm
-
-    intensidade_max_azul = intensidade_max_total / \
-        soma_proporcoes * proporcao_azul_norm
-    intensidade_max_vermelho = intensidade_max_total / \
-        soma_proporcoes * proporcao_vermelho_norm
-    intensidade_max_branco = intensidade_max_total / \
-        soma_proporcoes * proporcao_branco_norm
-
-    intensidade_min_azul = intensidade_min_total / \
-        soma_proporcoes * proporcao_azul_norm
-    intensidade_min_vermelho = intensidade_min_total / \
-        soma_proporcoes * proporcao_vermelho_norm
-    intensidade_min_branco = intensidade_min_total / \
-        soma_proporcoes * proporcao_branco_norm
-
-    # Exibir resultados
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("Azul - Máx", f"{intensidade_max_azul:.1f} μmol/m²/s")
-        st.metric("Azul - Mín", f"{intensidade_min_azul:.1f} μmol/m²/s")
-
-    with col2:
-        st.metric("Vermelho - Máx",
-                  f"{intensidade_max_vermelho:.1f} μmol/m²/s")
-        st.metric("Vermelho - Mín",
-                  f"{intensidade_min_vermelho:.1f} μmol/m²/s")
-
     with col3:
-        st.metric("Branco - Máx", f"{intensidade_max_branco:.1f} μmol/m²/s")
-        st.metric("Branco - Mín", f"{intensidade_min_branco:.1f} μmol/m²/s")
+        st.subheader("🔍 Visualizar")
+        # Seletor para visualização detalhada do canal
+        canal_selecionado = st.selectbox(
+            "Selecione o canal para detalhes",
+            ["Vermelho", "Azul", "Branco"],
+            key="canal_detalhado_config",
+            index=["Vermelho", "Azul", "Branco"].index(
+                st.session_state.canal_configuracao_atual)
+        )
 
-    # Gráfico de barras comparativo
-    st.subheader("📈 Comparação de Intensidades")
+        # Armazenar a seleção atual
+        if canal_selecionado != st.session_state.canal_configuracao_atual:
+            st.session_state.canal_configuracao_atual = canal_selecionado
 
-    intensidades_max = [intensidade_max_azul,
-                        intensidade_max_vermelho, intensidade_max_branco]
-    intensidades_min = [intensidade_min_azul,
-                        intensidade_min_vermelho, intensidade_min_branco]
-
-    options_barras = criar_grafico_comparacao_intensidades_barras(
-        intensidades_max, intensidades_min)
-    st_echarts(options=options_barras, height=400,
-               key="comparacao_intensidades_barras")
-
-    st.markdown("---")
-
-    # Seletor para visualização detalhada do canal
-    st.header("🔍 Visualização Detalhada por Canal")
-
-    canal_selecionado = st.selectbox(
-        "Selecione o canal para visualização detalhada:",
-        ["Vermelho", "Azul", "Branco"],
-        key="canal_detalhado"
-    )
-
-    # Mapear seleção para nomes internos
-    canal_map = {
-        "Vermelho": ("vermelho", "🔴", "Vermelho"),
-        "Azul": ("azul", "🔵", "Azul"),
-        "Branco": ("branco", "⚪", "Branco")
-    }
+        # Mapear seleção para nomes internos
+        canal_map = {
+            "Vermelho": ("vermelho", "🔴", "Vermelho"),
+            "Azul": ("azul", "🔵", "Azul"),
+            "Branco": ("branco", "⚪", "Branco")
+        }
 
     canal_nome, emoji, nome_display = canal_map[canal_selecionado]
 
     # Exibir detalhes do canal selecionado
-    st.subheader(f"{emoji} Canal {nome_display} - Detalhes")
+    st.markdown("---")
 
     # Obter dados do canal
     dados = sistema.get_dados_canal(canal_nome)
     params_gauss = st.session_state.parametros_gaussianos[f'canal_{canal_nome}']
     params_temp = st.session_state.parametros_temporais
 
-    # Métricas principais
-    col1, col2, col3, col4 = st.columns(4)
+    # Gráfico comparativo de intensidades
+    st.subheader(f"📈 Comparação de Intensidades - Todos os Canais")
 
-    with col1:
-        st.metric("Intensidade Máx",
-                  f"{dados['intensidade_max']:.1f} μmol/m²/s")
-        st.metric("Hora Início", f"{params_temp['hora_inicio']:02d}:00")
+    # Obter dados de todos os canais para o gráfico comparativo
+    dados_vermelho = sistema.get_dados_canal('vermelho')
+    dados_azul = sistema.get_dados_canal('azul')
+    dados_branco = sistema.get_dados_canal('branco')
 
-    with col2:
-        st.metric("Intensidade Mín",
-                  f"{dados['intensidade_min']:.1f} μmol/m²/s")
-        st.metric("Hora Fim", f"{params_temp['hora_fim']:02d}:00")
+    options_intensidades = criar_grafico_comparacao_intensidades(
+        dados_vermelho, dados_azul, dados_branco)
+    options_intensidades = apply_base_config(options_intensidades)
 
-    with col3:
-        st.metric("DLI Final", f"{dados['DLI_final']:.3f} mol/m²")
-        st.metric("Fotoperíodo",
-                  f"{params_temp['hora_fim'] - params_temp['hora_inicio']}h")
+    # Usar uma chave estável para o gráfico comparativo
+    st_echarts(options=options_intensidades, height=500,
+               key="comparacao_intensidades_config_principal")
 
-    with col4:
-        st.metric("ICE", f"{dados['ICE']:.2f} μmol/m²/s")
-        st.metric("Nº Pontos", params_temp['n_pontos'])
+    st.subheader(f"{emoji} Detalhes do Canal {nome_display}")
 
-    st.markdown("---")
+    # Container para os gráficos de detalhe
+    container_detalhes = st.container()
 
-    # Gráficos
-    col1, col2 = st.columns(2)
+    with container_detalhes:
+        col1, col2, col3 = st.columns([1, 1, 1])
 
-    with col1:
-        # Gráfico de intensidade
-        cor = COLORS['vermelho'] if canal_nome == 'vermelho' else COLORS['azul'] if canal_nome == 'azul' else COLORS['branco']
-        options_intensidade = criar_grafico_canal_detalhes(
-            dados, canal_nome, cor, params_gauss)
-        st_echarts(options=options_intensidade, height=400,
-                   key=f"intensidade_{canal_nome}_config")
+        with col1:
+            # Gráfico de intensidade - usar chave única baseada no canal
+            cor = COLORS['vermelho'] if canal_nome == 'vermelho' else COLORS['azul'] if canal_nome == 'azul' else COLORS['branco']
+            options_intensidade = criar_grafico_canal_detalhes(
+                dados, canal_nome, cor, params_gauss)
+            st_echarts(options=options_intensidade, height=400,
+                       key=f"intensidade_{canal_nome}_config_detalhe")
 
-    with col2:
-        # Gráfico da integral
-        options_integral = criar_grafico_integral(dados, canal_nome, cor)
-        st_echarts(options=options_integral, height=400,
-                   key=f"integral_{canal_nome}_config")
+        with col2:
+            # Gráfico da integral - usar chave única baseada no canal
+            options_integral = criar_grafico_integral(dados, canal_nome, cor)
+            st_echarts(options=options_integral, height=400,
+                       key=f"integral_{canal_nome}_config_detalhe",
+                       renderer="canvas",
+                       theme="light")
 
-    # Gráfico da distribuição gaussiana
-    st.subheader(f"📊 Distribuição Gaussiana")
-    options_gaussiana = criar_grafico_gaussiana(
-        dados, canal_nome, cor, params_gauss['sigma'], params_gauss['mi'])
-    st_echarts(options=options_gaussiana, height=400,
-               key=f"gaussiana_{canal_nome}_config")
+        with col3:
+            # Gráfico da distribuição gaussiana - usar chave única baseada no canal
+            options_gaussiana = criar_grafico_gaussiana(
+                dados, canal_nome, cor, params_gauss['sigma'], params_gauss['mi'])
+            st_echarts(options=options_gaussiana, height=400,
+                       key=f"gaussiana_{canal_nome}_config_detalhe",
+                       renderer="canvas",
+                       theme="light")
 
 # ============================================================================
 # ROTEAMENTO DAS ABAS (ATUALIZADO)
@@ -2085,15 +2642,22 @@ if aba_selecionada == "📊 Visão Geral":
     exibir_visao_geral()
 elif aba_selecionada == "🧪 Calibração Bancada":
     exibir_calibracao_bancada()
-elif aba_selecionada == "🔄 Configurar Canais":
+elif aba_selecionada == "🎛️ Configurar Canais":
     exibir_configurar_canais()
-# Removi completamente as chamadas das abas individuais de canal
 
-# Rodapé
+# 6. Rodapé otimizado
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #888; font-size: 0.9em;'>"
-    "🖥️ Sistema de Calibração de Bancadas | Desenvolvido para LAAC | v1.0"
-    "</div>",
-    unsafe_allow_html=True
-)
+with st.container():
+    footer_cols = st.columns(3)
+
+    with footer_cols[0]:
+        st.caption("**Sistema LAAC v1.0**")
+        st.caption("Spectral Int")
+
+    with footer_cols[1]:
+        st.caption("**Contato:**")
+        st.caption("laac@ufv.br")
+
+    with footer_cols[2]:
+        st.caption("**Última atualização:**")
+        st.caption(datetime.now().strftime("%d/%m/%Y %H:%M"))
