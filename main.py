@@ -418,7 +418,8 @@ COLORS = {
     'grid': '#e0e6f1',
     'text': '#2c3e50',
     'title': '#1a1a1a',
-    'axis': '#7b7b7b'
+    'axis': '#7b7b7b',
+    'referencia': '#91cc75'
 }
 
 # Configurações de tema padrão
@@ -1604,7 +1605,8 @@ with st.sidebar:
         "Selecione a seção:",
         ["📊 Visão Geral",
          "🧪 Calibração Bancada",
-         "🎛️ Configurar Canais"],
+         "🎛️ Configurar Canais",
+         "༗ Espectros (experimental)"],
         label_visibility="collapsed"
     )
 
@@ -2629,9 +2631,809 @@ def exibir_configurar_canais():
             options_gaussiana = criar_grafico_gaussiana(
                 dados, canal_nome, cor, params_gauss['sigma'], params_gauss['mi'])
             st_echarts(options=options_gaussiana, height=400,
-                       key=f"gaussiana_{canal_nome}_config_detalhe",
-                       renderer="canvas",
-                       theme="light")
+                       key=f"gaussiana_{canal_nome}_config_detalhe")
+
+
+def exibir_simular_espectro():
+    """Exibe a interface para simulação de espectros usando ECharts"""
+
+    # Divisão em duas colunas para configurações
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
+    import json
+    import os
+    # Carregar espectros do arquivo spectra_data.json
+    spectra_path = os.path.join(os.path.dirname(__file__), "spectra_data.json")
+    # usar cache para leitura do JSON (evita re-leitura em cada rerun)
+
+    @st.cache_data
+    def load_spectra(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    spectra_data = load_spectra(spectra_path)
+
+    # Gerar nomes amigáveis para o selectbox
+    def nome_amigavel(chave):
+        nomes = {
+            "Chlorophyll a": "Clorofila A (Absorbância)",
+            "Chlorophyll b": "Clorofila B (Absorbância)",
+            "Beta Carotene": "Beta-caroteno (Absorbância)",
+            "Zeaxanthin": "Zeaxantina (Absorbância)",
+            "Anthocyanin": "Antocianina (Absorbância)",
+            "LED_Branco": "LED Branco 6500K (Transmittância)",
+            "LED_Azul": "LED Azul (Transmittância)",
+            "LED_Vermelho": "LED Vermelho (Transmittância)"
+        }
+        return nomes.get(chave, chave)
+
+    opcoes_espectros = list(spectra_data.keys())
+    opcoes_amigaveis = [nome_amigavel(k) for k in opcoes_espectros]
+    with col1:
+        espectro_idx = st.selectbox(
+            "Selecione o espectro de referência:",
+            options=range(len(opcoes_amigaveis)),
+            format_func=lambda i: opcoes_amigaveis[i],
+            index=0
+        )
+        espectro_ref = opcoes_espectros[espectro_idx]
+
+    # Configurações do usuário
+    with col2:
+        faixa_min = st.number_input(
+            "Comprimento de onda mínimo (nm):", 380, 780, 380)
+
+    with col3:
+        faixa_max = st.number_input(
+            "Comprimento de onda máximo (nm):", 380, 780, 780)
+
+    with col4:
+        use_native = st.checkbox(
+            "Usar resolução nativa do espectro",
+            value=False,
+            help="Se ativado, usa os comprimentos de onda originais do espectro selecionado (melhor fidelidade)."
+        )
+
+        resolucao = st.slider(
+            "Resolução espectral (nm):", 1, 10, 5,
+            help="Passo em nm para reamostragem quando não usar resolução nativa."
+        )
+
+    # grid preliminar (pode ser sobrescrito pela resolução nativa mais abaixo)
+    wavelengths = np.arange(faixa_min, faixa_max + resolucao, resolucao)
+
+    import json
+    import os
+    # Carregar espectros do arquivo spectra_data.json
+    spectra_path = os.path.join(os.path.dirname(__file__), "spectra_data.json")
+    with open(spectra_path, "r") as f:
+        spectra_data = json.load(f)
+
+    espectro_json = spectra_data.get(espectro_ref)
+    if espectro_json is None:
+        st.error(
+            f"Espectro '{espectro_ref}' não encontrado no arquivo spectra_data.json.")
+        return
+
+    # Cálculos pesados e reamostragem cacheados para minimizar custo em reruns
+    @st.cache_data
+    def compute_spectral_data(espectro_json, spectra_data, faixa_min, faixa_max, resolucao, use_native, max_points=2000):
+        # preparar grade
+        wavelengths = np.arange(faixa_min, faixa_max + resolucao, resolucao)
+
+        # resolver grade nativa
+        if use_native:
+            native_wl = np.array(espectro_json.get(
+                "wavelengths", []), dtype=float)
+            if native_wl.size > 0:
+                mask = (native_wl >= faixa_min) & (native_wl <= faixa_max)
+                native_grid = native_wl[mask]
+                if native_grid.size > 0:
+                    wavelengths = native_grid
+
+        # safety cap
+        if len(wavelengths) > max_points:
+            factor = int(np.ceil(len(wavelengths) / max_points))
+            wavelengths = wavelengths[::factor]
+
+        espectro_wl = np.array(espectro_json.get(
+            "wavelengths", []), dtype=float)
+        if "absorbance" in espectro_json:
+            espectro_vals = np.array(espectro_json["absorbance"], dtype=float)
+            tipo_espectro = "absorbância"
+            cor_espectro = "#2E86AB"
+        elif "irradiance" in espectro_json:
+            espectro_vals = np.array(espectro_json["irradiance"], dtype=float)
+            tipo_espectro = "irradiância"
+            cor_espectro = "#FFD166"
+        elif "transmittance" in espectro_json:
+            espectro_vals = np.array(
+                espectro_json["transmittance"], dtype=float)
+            tipo_espectro = "transmittância"
+            cor_espectro = "#E0E6ED"
+        else:
+            espectro_vals = np.array([])
+            tipo_espectro = "unknown"
+            cor_espectro = "#999"
+
+        if espectro_wl.size == 0 or espectro_vals.size == 0:
+            espectro_ref_valores = np.zeros_like(wavelengths, dtype=float)
+        else:
+            espectro_ref_valores = np.interp(
+                wavelengths, espectro_wl, espectro_vals)
+
+        # carregar LEDs e reamostrar
+        def interp_led(key):
+            led_json = spectra_data.get(key)
+            if not led_json:
+                return np.zeros_like(wavelengths)
+            return np.interp(wavelengths, np.array(led_json["wavelengths"], dtype=float), np.array(led_json.get("transmittance", []), dtype=float))
+
+        led_vermelho = interp_led("LED_Vermelho")
+        led_azul = interp_led("LED_Azul")
+        led_branco = interp_led("LED_Branco")
+
+        # escala se for irradiância
+        if tipo_espectro == "irradiância" and espectro_ref_valores.sum() > 0:
+            intensidade_ref = 650
+            fator_escala = intensidade_ref / \
+                (np.trapezoid(espectro_ref_valores, wavelengths) / 1000)
+            espectro_ref_valores = espectro_ref_valores * fator_escala
+
+        # funções utilitarias
+        def identificar_picos(espectro, wavelengths, threshold=0.3):
+            picos = []
+            for i in range(1, len(espectro)-1):
+                if espectro[i] > espectro[i-1] and espectro[i] > espectro[i+1] and espectro[i] > threshold:
+                    picos.append({'wavelength': float(
+                        wavelengths[i]), 'intensity': float(espectro[i]), 'fwhm': 20})
+            return picos
+
+        def calcular_pfd_bandas(espectro, wavelengths):
+            bandas = {'UV': (380, 400), 'BLUE': (400, 500), 'GREEN': (
+                500, 600), 'RED': (600, 700), 'FAR_RED': (700, 780)}
+            resultados = {}
+            for nome, (min_wl, max_wl) in bandas.items():
+                mask = (wavelengths >= min_wl) & (wavelengths <= max_wl)
+                if np.any(mask):
+                    area = np.trapezoid(espectro[mask], wavelengths[mask])
+                    resultados[nome] = float(area / 1000)
+                else:
+                    resultados[nome] = 0.0
+            mask_par = (wavelengths >= 400) & (wavelengths <= 700)
+            resultados['PPFD'] = float(np.trapezoid(
+                espectro[mask_par], wavelengths[mask_par]) / 1000) if np.any(mask_par) else 0.0
+            return resultados
+
+        def calcular_lamp_otimo(espectro_ref, led_v, led_a, led_b):
+            X = np.column_stack([led_v, led_a, led_b])
+            coef, residuals, rank, s = np.linalg.lstsq(
+                X, espectro_ref, rcond=None)
+            coef = np.maximum(coef, 0)
+            if coef.max() > 0:
+                coef = coef / coef.max()
+            return [float(c) for c in coef]
+
+        picos_ref = identificar_picos(espectro_ref_valores, wavelengths)
+        pfd_ref = calcular_pfd_bandas(espectro_ref_valores, wavelengths)
+        pfd_vermelho = calcular_pfd_bandas(led_vermelho, wavelengths)
+        pfd_azul = calcular_pfd_bandas(led_azul, wavelengths)
+        pfd_branco = calcular_pfd_bandas(led_branco, wavelengths)
+
+        coef = calcular_lamp_otimo(
+            espectro_ref_valores, led_vermelho, led_azul, led_branco)
+        proporcoes_lamp = {
+            'LAMP_CH1_Vermelho': coef[0], 'LAMP_CH2_Azul': coef[1], 'LAMP_CH3_Branco': coef[2]}
+        lamp_ch1 = led_vermelho * proporcoes_lamp['LAMP_CH1_Vermelho']
+        lamp_ch2 = led_azul * proporcoes_lamp['LAMP_CH2_Azul']
+        lamp_ch3 = led_branco * proporcoes_lamp['LAMP_CH3_Branco']
+        lamp_soma = lamp_ch1 + lamp_ch2 + lamp_ch3
+        pfd_lamp_ch1 = calcular_pfd_bandas(lamp_ch1, wavelengths)
+        pfd_lamp_ch2 = calcular_pfd_bandas(lamp_ch2, wavelengths)
+        pfd_lamp_ch3 = calcular_pfd_bandas(lamp_ch3, wavelengths)
+        pfd_lamp_soma = calcular_pfd_bandas(lamp_soma, wavelengths)
+
+        return {
+            'wavelengths': wavelengths,
+            'espectro_ref_valores': espectro_ref_valores,
+            'led_vermelho': led_vermelho,
+            'led_azul': led_azul,
+            'led_branco': led_branco,
+            'picos_ref': picos_ref,
+            'pfd_ref': pfd_ref,
+            'pfd_vermelho': pfd_vermelho,
+            'pfd_azul': pfd_azul,
+            'pfd_branco': pfd_branco,
+            'proporcoes_lamp': proporcoes_lamp,
+            'lamp_ch1': lamp_ch1,
+            'lamp_ch2': lamp_ch2,
+            'lamp_ch3': lamp_ch3,
+            'lamp_soma': lamp_soma,
+            'pfd_lamp_ch1': pfd_lamp_ch1,
+            'pfd_lamp_ch2': pfd_lamp_ch2,
+            'pfd_lamp_ch3': pfd_lamp_ch3,
+            'pfd_lamp_soma': pfd_lamp_soma,
+            'tipo_espectro': tipo_espectro,
+            'cor_espectro': cor_espectro
+        }
+
+    # calcular (cacheado) - menor custo nas reruns
+    computed = compute_spectral_data(
+        espectro_json, spectra_data, faixa_min, faixa_max, resolucao, use_native)
+
+    # expandir resultados locais
+    wavelengths = computed['wavelengths']
+    espectro_ref_valores = computed['espectro_ref_valores']
+    led_vermelho = computed['led_vermelho']
+    led_azul = computed['led_azul']
+    led_branco = computed['led_branco']
+    picos_ref = computed['picos_ref']
+    pfd_ref = computed['pfd_ref']
+    pfd_vermelho = computed['pfd_vermelho']
+    pfd_azul = computed['pfd_azul']
+    pfd_branco = computed['pfd_branco']
+    proporcoes_lamp = computed['proporcoes_lamp']
+    lamp_ch1 = computed['lamp_ch1']
+    lamp_ch2 = computed['lamp_ch2']
+    lamp_ch3 = computed['lamp_ch3']
+    lamp_soma = computed['lamp_soma']
+    pfd_lamp_ch1 = computed['pfd_lamp_ch1']
+    pfd_lamp_ch2 = computed['pfd_lamp_ch2']
+    pfd_lamp_ch3 = computed['pfd_lamp_ch3']
+    pfd_lamp_soma = computed['pfd_lamp_soma']
+    tipo_espectro = computed['tipo_espectro']
+    cor_espectro = computed['cor_espectro']
+
+    # ============================================================================
+    # CÁLCULO DE ICE PARA CADA LAMP BASEADO NO ESPECTRO DE REFERÊNCIA
+    # ============================================================================
+
+    # Obter intensidade máxima total da configuração atual
+    intensidade_max_total = st.session_state.parametros_canais['intensidade_max_total']
+    intensidade_min_total = st.session_state.parametros_canais['intensidade_min_total']
+
+    # Obter proporções atuais dos canais
+    proporcoes_atuais = np.array([
+        st.session_state.parametros_canais['proporcao_vermelho'],
+        st.session_state.parametros_canais['proporcao_azul'],
+        st.session_state.parametros_canais['proporcao_branco']
+    ])
+
+    # Normalizar proporções
+    if proporcoes_atuais.sum() > 0:
+        proporcoes_norm = proporcoes_atuais / proporcoes_atuais.sum()
+    else:
+        proporcoes_norm = np.array([0.33, 0.33, 0.34])
+
+    # Calcular ICE baseado na eficiência espectral
+    # ICE será proporcional ao PPFD do espectro de referência nas faixas dos LEDs
+    ppfd_ref_total = pfd_ref['PPFD']
+
+    # Calcular eficiência de cada LED para o espectro de referência
+    # Usar a correlação entre os espectros
+    eficiencia_v = np.correlate(led_vermelho, espectro_ref_valores)[
+        0] if len(led_vermelho) > 0 else 0
+    eficiencia_a = np.correlate(led_azul, espectro_ref_valores)[
+        0] if len(led_azul) > 0 else 0
+    eficiencia_b = np.correlate(led_branco, espectro_ref_valores)[
+        0] if len(led_branco) > 0 else 0
+
+    # Normalizar eficiências
+    eficiencias = np.array([eficiencia_v, eficiencia_a, eficiencia_b])
+    if eficiencias.sum() > 0:
+        eficiencias_norm = eficiencias / eficiencias.sum()
+    else:
+        eficiencias_norm = np.array([0.33, 0.33, 0.34])
+
+    # Calcular ICE para cada canal (fixo durante o dia)
+    # Baseado na intensidade máxima e eficiência espectral
+    ice_base = intensidade_min_total + \
+        (intensidade_max_total - intensidade_min_total) * 0.7
+
+    ice_lamp_ch1 = ice_base * \
+        proporcoes_norm[0] * eficiencias_norm[0] * \
+        proporcoes_lamp['LAMP_CH1_Vermelho']
+    ice_lamp_ch2 = ice_base * \
+        proporcoes_norm[1] * eficiencias_norm[1] * \
+        proporcoes_lamp['LAMP_CH2_Azul']
+    ice_lamp_ch3 = ice_base * \
+        proporcoes_norm[2] * eficiencias_norm[2] * \
+        proporcoes_lamp['LAMP_CH3_Branco']
+
+    # Arredondar para inteiros (como no padrão LAMP)
+    ice_lamp_ch1_int = int(round(ice_lamp_ch1))
+    ice_lamp_ch2_int = int(round(ice_lamp_ch2))
+    ice_lamp_ch3_int = int(round(ice_lamp_ch3))
+
+    # Obter horários do sistema
+    hora_inicio = st.session_state.parametros_temporais['hora_inicio']
+    hora_fim = st.session_state.parametros_temporais['hora_fim']
+
+    # Gerar conteúdo LAMP_ para cada canal (formato HH MM SS ICE)
+    conteudo_lamp_ch1 = f"{hora_inicio:02d} 00 00 {ice_lamp_ch1_int}\n{hora_fim:02d} 00 00 {ice_lamp_ch1_int}\n"
+    conteudo_lamp_ch2 = f"{hora_inicio:02d} 00 00 {ice_lamp_ch2_int}\n{hora_fim:02d} 00 00 {ice_lamp_ch2_int}\n"
+    conteudo_lamp_ch3 = f"{hora_inicio:02d} 00 00 {ice_lamp_ch3_int}\n{hora_fim:02d} 00 00 {ice_lamp_ch3_int}\n"
+
+    # ============================================================================
+    # GRAFICOS ESPECTRAIS
+    # ============================================================================
+
+    # Gráfico 1: Espectros comparados
+    col1, col2 = st.columns([1, 1])
+
+    # placeholders para evitar remounts visíveis durante reruns
+    ph_leds = col1.empty()
+    ph_lamp = col2.empty()
+
+    with ph_leds:
+        # Gráfico comparativo de LEDs
+        options_leds = {
+            "color": [COLORS['soma'], COLORS['vermelho'], COLORS['azul'], COLORS['branco']],
+            "title": {
+                "text": "Espectros dos LEDs da Bancada",
+                "subtext": "Espectros normalizados para comparação",
+                "left": "center",
+                "padding": [0, 0, 0, 0]
+            },
+            "tooltip": {
+                "trigger": "axis",
+                "axisPointer": {"type": "cross"}
+            },
+            "legend": {
+                "data": [espectro_ref, "LED Vermelho", "LED Azul",
+                         "LED Branco"],
+                "top": "10%",
+                "type": "scroll",
+                "padding": [50, 0, 0, 0],
+                "itemGap": 5,
+                "itemWidth": 25,
+                "itemHeight": 14
+            },
+            "xAxis": {
+                "name": "Comprimento de onda (nm)",
+                "nameLocation": "middle",
+                "nameGap": 25,
+                "type": "value",
+                "min": faixa_min,
+                "max": faixa_max
+            },
+            "yAxis": {
+                "name": "Intensidade Normalizada",
+                "nameLocation": "middle",
+                "nameGap": 40,
+                "type": "value"
+            },
+            "series": [
+                {
+                    "name": espectro_ref,
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
+                    "smooth": True,
+                    "lineStyle": {
+                        "color": cor_espectro,
+                        "width": 1,
+                        "type": "dashed"
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "LED Vermelho",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_vermelho)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['vermelho'], "width": 2},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['vermelho'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['vermelho'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "LED Azul",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_azul)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['azul'], "width": 2},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0, "color": COLORS['azul'] + "40"},
+                                {"offset": 1, "color": COLORS['azul'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "LED Branco",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_branco)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['branco'], "width": 2},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['branco'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['branco'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                }
+            ],
+            "grid": {
+                "left": "30px",
+                "right": "40px",
+                "bottom": "20px",
+                "top": "80px",
+                "containLabel": True
+            }
+        }
+        st_echarts(options=apply_base_config(options_leds),
+                   height=350, key="espectros_leds")
+    with ph_lamp:
+        # Gráfico dos espectros LAMP_CH
+        options_lamp_espectros = {
+            "color": [COLORS['vermelho'], COLORS['azul'], COLORS['branco'], COLORS['soma'], COLORS['referencia']],
+            "title": {
+                "text": "Espectros LAMP_CH Otimizados",
+                "subtext": f"Proporções: CH1={proporcoes_lamp['LAMP_CH1_Vermelho']:.2f}, CH2={proporcoes_lamp['LAMP_CH2_Azul']:.2f}, CH3={proporcoes_lamp['LAMP_CH3_Branco']:.2f}",
+                "left": "center",
+                "padding": [0, 0, 0, 0]
+            },
+            "tooltip": {
+                "trigger": "axis",
+                "axisPointer": {"type": "cross"}
+            },
+            "legend": {
+                "data": ["LAMP_CH1 (Vermelho)", "LAMP_CH2 (Azul)",
+                         "LAMP_CH3 (Branco)", "Soma Total", "Referência"],
+                "type": "scroll",
+                "top": "10%",
+                "padding": [50, 0, 0, 0],
+                "itemGap": 5,
+                "itemWidth": 25,
+                "itemHeight": 14
+            },
+            "xAxis": {
+                "name": "Comprimento de onda (nm)",
+                "nameLocation": "middle",
+                "nameGap": 25,
+                "type": "value",
+                "min": faixa_min,
+                "max": faixa_max
+            },
+            "yAxis": {
+                "name": "Intensidade",
+                "nameLocation": "middle",
+                "nameGap": 40,
+                "type": "value"
+            },
+            "series": [
+                {
+                    "name": "LAMP_CH1 (Vermelho)",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch1)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['vermelho'], "width": 1, "type": "dashed"},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['vermelho'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['vermelho'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "LAMP_CH2 (Azul)",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch2)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['azul'], "width": 1, "type": "dashed"},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['azul'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['azul'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "LAMP_CH3 (Branco)",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch3)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['branco'], "width": 1, "type": "dashed"},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['branco'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['branco'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "Soma Total",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_soma)],
+                    "smooth": True,
+                    "lineStyle": {"color": COLORS['soma'], "width": 2},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['soma'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['soma'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                },
+                {
+                    "name": "Referência",
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
+                    "smooth": True,
+                    "lineStyle": {"color": cor_espectro, "width": 2, "type": "dot"},
+                    "areaStyle": {
+                        "color": {
+                            "type": "linear",
+                            "x": 0, "y": 0, "x2": 0, "y2": 1,
+                            "colorStops": [
+                                {"offset": 0,
+                                    "color": COLORS['referencia'] + "40"},
+                                {"offset": 1,
+                                    "color": COLORS['referencia'] + "05"}
+                            ]
+                        }
+                    },
+                    "showSymbol": False
+                }
+            ],
+            "grid": {
+                "left": "30px",
+                "right": "40px",
+                "bottom": "20px",
+                "top": "80px",
+                "containLabel": True
+            }
+        }
+        st_echarts(options=apply_base_config(
+            options_lamp_espectros), height=350, key="espectros_lamp")
+
+    # ============================================================================
+    # GRÁFICO E TABELA DE ICE FIXO
+    # ============================================================================
+
+    col_ice1, col_ice2 = st.columns([1, 1])
+
+    ph_ice = col_ice2.empty()
+
+    with col_ice1:
+        # Tabela com valores de ICE
+        st.markdown("**📊 Valores de ICE Fixos**")
+
+        df_ice_fixo = pd.DataFrame({
+            'Canal': ['LAMP_CH1 (Vermelho)', 'LAMP_CH1 (Vermelho)',
+                      'LAMP_CH2 (Azul)', 'LAMP_CH2 (Azul)',
+                      'LAMP_CH3 (Branco)', 'LAMP_CH3 (Branco)'],
+            'ICE (μmol/m²/s)': [ice_lamp_ch1_int, ice_lamp_ch1_int,
+                                ice_lamp_ch2_int,  ice_lamp_ch2_int,
+                                ice_lamp_ch3_int, ice_lamp_ch3_int],
+            'Proporção': [
+                f"{proporcoes_lamp['LAMP_CH1_Vermelho']:.3f}",
+                f"{proporcoes_lamp['LAMP_CH1_Vermelho']:.3f}",
+                f"{proporcoes_lamp['LAMP_CH2_Azul']:.3f}",
+                f"{proporcoes_lamp['LAMP_CH2_Azul']:.3f}",
+                f"{proporcoes_lamp['LAMP_CH3_Branco']:.3f}",
+                f"{proporcoes_lamp['LAMP_CH3_Branco']:.3f}"
+            ],
+            'Hora': [
+                f"{hora_inicio:02d} 00 00 {ice_lamp_ch1_int}",
+                f"{hora_fim:02d} 00 00 {ice_lamp_ch1_int}",
+                f"{hora_inicio:02d} 00 00 {ice_lamp_ch2_int}",
+                f"{hora_fim:02d} 00 00 {ice_lamp_ch2_int}",
+                f"{hora_inicio:02d} 00 00 {ice_lamp_ch3_int}",
+                f"{hora_fim:02d} 00 00 {ice_lamp_ch3_int}"
+            ]
+        })
+
+        st.dataframe(df_ice_fixo, use_container_width=True, hide_index=True)
+
+    with col_ice2:
+        # Gráfico de barras mostrando ICE fixo por canal
+        # Preparar dados para o gráfico
+        data_barras_ice = [
+            {"value": ice_lamp_ch1_int, "itemStyle": {
+                "color": COLORS['vermelho']}},
+            {"value": ice_lamp_ch2_int, "itemStyle": {
+                "color": COLORS['azul']}},
+            {"value": ice_lamp_ch3_int, "itemStyle": {
+                "color": COLORS['branco']}}
+        ]
+
+        options_ice_fixo = {
+            "title": {
+                "text": "ICE Fixo por Canal LAMP",
+                "subtext": f"Valores constantes durante {hora_inicio:02d}:00-{hora_fim:02d}:00",
+                "left": "center"
+            },
+            "tooltip": {
+                "trigger": "axis",
+                "formatter": "{b}: {c} μmol/m²/s"
+            },
+            "xAxis": {
+                "type": "category",
+                "data": ["LAMP_CH1", "LAMP_CH2", "LAMP_CH3"],
+                "axisLabel": {
+                    "rotate": 0,
+                    "interval": 0
+                }
+            },
+            "yAxis": {
+                "name": "ICE (μmol/m²/s)",
+                "nameLocation": "middle",
+                "nameGap": 40,
+                "type": "value",
+                "min": 0
+            },
+            "series": [{
+                "name": "ICE Fixo",
+                "type": "bar",
+                "data": data_barras_ice,
+                "barWidth": "60%",
+                "itemStyle": {
+                    "borderRadius": [4, 4, 0, 0],
+                    "borderColor": "#fff",
+                    "borderWidth": 1
+                },
+                "label": {
+                    "show": True,
+                    "position": "top",
+                    "formatter": "{c}",
+                    "fontSize": 12,
+                    "fontWeight": "bold"
+                },
+                "emphasis": {
+                    "itemStyle": {
+                        "shadowBlur": 10,
+                        "shadowColor": "rgba(0, 0, 0, 0.3)"
+                    }
+                }
+            }],
+            "grid": {
+                "left": "60px",
+                "right": "40px",
+                "bottom": "10px",
+                "top": "60",
+                "containLabel": True
+            }
+        }
+
+        with ph_ice:
+            st_echarts(options=apply_base_config(
+                options_ice_fixo), height=300, key="ice_fixo")
+
+    # Resultados numéricos e tabelas
+    col_res1, col_res2, col_res3 = st.columns(3)
+
+    with col_res1:
+        st.markdown("**📈 PROPORÇÕES LAMP ÓTIMAS**")
+        df_proporcoes = pd.DataFrame([
+            {"Canal": "LAMP_CH1 (Vermelho)",
+                "Proporção": f"{proporcoes_lamp['LAMP_CH1_Vermelho']:.3f}"},
+            {"Canal": "LAMP_CH2 (Azul)",
+                "Proporção": f"{proporcoes_lamp['LAMP_CH2_Azul']:.3f}"},
+            {"Canal": "LAMP_CH3 (Branco)",
+                "Proporção": f"{proporcoes_lamp['LAMP_CH3_Branco']:.3f}"}
+        ])
+        st.dataframe(df_proporcoes, use_container_width=True,
+                     hide_index=True)
+
+        # Botões de download para arquivos LAMP_ individuais
+        st.markdown("**📥 Download Arquivos LAMP**")
+
+        col_dl1, col_dl2, col_dl3 = st.columns([1, 1, 1])
+
+        with col_dl1:
+            st.download_button(
+                label="CH1.txt",
+                data=conteudo_lamp_ch1,
+                file_name="LAMP_CH1.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+
+        with col_dl2:
+            st.download_button(
+                label="CH2.txt",
+                data=conteudo_lamp_ch2,
+                file_name="LAMP_CH2.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+
+        with col_dl3:
+            st.download_button(
+                label="CH3.txt",
+                data=conteudo_lamp_ch3,
+                file_name="LAMP_CH3.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+
+    with col_res2:
+        st.markdown("**🔬 PFDs DO ESPECTRO DE REFERÊNCIA**")
+        df_pfd_ref = pd.DataFrame([
+            {"Banda": "PPFD (400-700nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['PPFD']:.1f}"},
+            {"Banda": "BLUE (400-500nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['BLUE']:.1f}"},
+            {"Banda": "GREEN (500-600nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['GREEN']:.1f}"},
+            {"Banda": "RED (600-700nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['RED']:.1f}"},
+            {"Banda": "FAR RED (700-780nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['FAR_RED']:.1f}"},
+            {"Banda": "UV (380-400nm)",
+                "Valor (μmol/m²/s)": f"{pfd_ref['UV']:.1f}"}
+        ])
+        st.dataframe(df_pfd_ref, use_container_width=True, hide_index=True)
+
+    with col_res3:
+        st.markdown("**⚡ PFDs DA SOMA LAMP**")
+        df_pfd_lamp = pd.DataFrame([
+            {"Banda": "PPFD (400-700nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['PPFD']:.1f}"},
+            {"Banda": "BLUE (400-500nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['BLUE']:.1f}"},
+            {"Banda": "GREEN (500-600nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['GREEN']:.1f}"},
+            {"Banda": "RED (600-700nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['RED']:.1f}"},
+            {"Banda": "FAR RED (700-780nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['FAR_RED']:.1f}"},
+            {"Banda": "UV (380-400nm)",
+                "Valor (μmol/m²/s)": f"{pfd_lamp_soma['UV']:.1f}"}
+        ])
+        st.dataframe(df_pfd_lamp, use_container_width=True,
+                     hide_index=True)
+
 
 # ============================================================================
 # ROTEAMENTO DAS ABAS (ATUALIZADO)
@@ -2644,6 +3446,8 @@ elif aba_selecionada == "🧪 Calibração Bancada":
     exibir_calibracao_bancada()
 elif aba_selecionada == "🎛️ Configurar Canais":
     exibir_configurar_canais()
+elif aba_selecionada == "༗ Espectros (experimental)":
+    exibir_simular_espectro()
 
 # 6. Rodapé otimizado
 st.markdown("---")

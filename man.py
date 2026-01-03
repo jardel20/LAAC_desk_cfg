@@ -42,11 +42,13 @@ def exibir_manual_completo():
             "🧪 CALIBRAÇÃO DA BANCADA",
             "📁 ARQUIVOS LAMP",
             "📊 INTERPRETAÇÃO DE GRÁFICOS",
+            "🌈 ESPECTROS",  # NOVA ABA ADICIONADA
             "⚠️ BOAS PRÁTICAS",
             "🔍 TROUBLESHOOTING",
             "📖 REFERÊNCIAS"
         ])
 
+        # Chamar cada função de conteúdo
         # Chamar cada função de conteúdo
         with tabs[0]:
             _conteudo_introducao_geral()
@@ -67,12 +69,15 @@ def exibir_manual_completo():
             _conteudo_interpretacao_graficos()
 
         with tabs[6]:
-            _conteudo_boas_praticas()
+            _conteudo_espectros()
 
         with tabs[7]:
-            _conteudo_troubleshooting()
+            _conteudo_boas_praticas()
 
         with tabs[8]:
+            _conteudo_troubleshooting()
+
+        with tabs[9]:
             _conteudo_referencias()
 
     st.markdown("---")
@@ -652,6 +657,47 @@ def _conteudo_interpretacao_graficos():
     | Grade | `#e0e6f1` | Fundo dos gráficos | Elementos de referência |
     
     **CONVENÇÃO:** As cores são consistentes em todos os gráficos para facilitar a interpretação.
+    """)
+
+
+def _conteudo_espectros():
+    st.markdown("""
+    #### **📊 GLOSSÁRIO ESPECTRAL**
+    
+    **PPFD (Photosynthetic Photon Flux Density):**
+    - **Definição:** Densidade de fluxo de fótons fotossintéticos na faixa 400-700nm
+    - **Cálculo:** $\\Phi_{PPFD} = \\int_{400}^{700} E(\\lambda) \\, d\\lambda$
+    - **Unidade:** μmol·m⁻²·s⁻¹
+    
+    **PFD-BLUE, PFD-GREEN, PFD-RED:**
+    - **Definição:** Densidade de fluxo de fótons em bandas espectrais específicas
+    - **Banda BLUE:** 400-500nm (importante para morfogênese, fototropismo)
+    - **Banda GREEN:** 500-600nm (penetração no dossel, sinalização)
+    - **Banda RED:** 600-700nm (fotossíntese máxima, floração)
+    - **Banda FAR RED:** 700-780nm (relação R:FR, controle morfogenético)
+    - **Banda UV:** 380-400nm (produção de metabólitos secundários)
+    
+    #### **🔍 MÉTODO DE CÁLCULO DAS PROPORÇÕES LAMP**
+    
+    O sistema utiliza **mínimos quadrados linear** para encontrar as proporções ótimas:
+    
+    $$
+    \\min_{a,b,c} \\left\\| E_{ref}(\\lambda) - \\left(a \\cdot E_{V}(\\lambda) + b \\cdot E_{A}(\\lambda) + c \\cdot E_{B}(\\lambda)\\right) \\right\\|^2
+    $$
+    
+    **Onde:**
+    - $E_{ref}(\\lambda)$: Espectro de referência
+    - $E_{V}(\\lambda)$: Espectro do LED vermelho
+    - $E_{A}(\\lambda)$: Espectro do LED azul  
+    - $E_{B}(\\lambda)$: Espectro do LED branco
+    - $a,b,c$: Proporções dos canais LAMP_CH1, LAMP_CH2, LAMP_CH3
+    
+    #### **🎯 INTERPRETAÇÃO DOS RESULTADOS**
+    
+    - **Proporções próximas de 1.0:** O canal contribui significativamente
+    - **Proporções próximas de 0.0:** O canal tem pouca contribuição
+    - **Diferença PPFD < 10%:** Aproximação espectral boa
+    - **Diferença PPFD > 20%:** Pode ser necessário ajuste manual
     """)
 
 
