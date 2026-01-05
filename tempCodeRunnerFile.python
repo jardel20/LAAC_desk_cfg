@@ -1,0 +1,38 @@
+# language: python
+import json
+import sys
+
+CANDIDATE_KEYS = ("irradiance", "transmittance", "absorbance", "values", "data")
+
+def main(path="spectra_data.json"):
+    with open(path, "r", encoding="utf-8") as f:
+        j = json.load(f)
+
+    mismatches = []
+    for name, obj in j.items():
+        wl = obj.get("wavelengths")
+        if not isinstance(wl, list):
+            mismatches.append((name, "wavelengths missing or not list", None, None))
+            continue
+        for k in CANDIDATE_KEYS:
+            if k in obj:
+                arr = obj.get(k)
+                if not isinstance(arr, list):
+                    mismatches.append((name, f"{k} not a list", len(wl), None))
+                elif len(wl) != len(arr):
+                    mismatches.append((name, k, len(wl), len(arr)))
+                break
+        else:
+            mismatches.append((name, "no data array (irradiance/transmittance/absorbance/...)", len(wl), None))
+
+    if not mismatches:
+        print("OK: todos os espectros têm comprimentos compatíveis.")
+        return 0
+
+    print("MISMATCHES:")
+    for entry in mismatches:
+        print(" -", entry)
+    return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,7 +7,7 @@ from datetime import datetime
 from scipy import stats
 from scipy.interpolate import interp1d
 from streamlit_echarts import st_echarts
-from man import exibir_manual_completo
+from scripts.man import exibir_manual_completo
 
 # Configurar página
 # Configuração básica da página
@@ -51,7 +51,7 @@ st.markdown("""
 # Conteúdo do cabeçalho
 st.markdown("""
     <div class="main-header">
-        <h1>🖥️ Sistema de Calibração de Bancadas LAAC</h1>
+        <h1>🖥️ Calibração de Bancadas LAAC</h1>
         <p>Sistema integrado para calibração fotobiológica e geração de perfis de iluminação</p>
         <div style="margin-top: 1rem;">
             <span class="badge">Versão 1.0.0</span>
@@ -1818,6 +1818,7 @@ with st.sidebar:
 
                         VALORES DE ICE POR CANAL:
                         - Vermelho: {sistema.get_dados_canal('vermelho')['ICE']:.1f} μmol/m²/s
+
                         - Azul: {sistema.get_dados_canal('azul')['ICE']:.1f} μmol/m²/s
                         - Branco: {sistema.get_dados_canal('branco')['ICE']:.1f} μmol/m²/s
 
@@ -1893,6 +1894,23 @@ with st.sidebar:
                      help="Instruções detalhadas do sistema",
                      type="primary"):
             st.session_state.show_full_manual = True
+
+    # 6. Rodapé
+    st.markdown("---")
+    with st.container():
+        footer_cols = st.columns(3)
+
+        with footer_cols[0]:
+            st.caption("Última versão:")
+            st.caption("1.0")
+
+        with footer_cols[1]:
+            st.caption("Meios de Contato:")
+            st.caption("laac@ufv.br")
+
+        with footer_cols[2]:
+            st.caption("Última atualização:")
+            st.caption(datetime.now().strftime("%d/%m/%Y"))
 
 # ============================================================================
 # MODAl DE AJUDA
@@ -2262,7 +2280,7 @@ def exibir_calibracao_bancada():
         if st.button(icon="🔄", label="Restaurar Valores Padrão",
                      key=f"reset_button_{canal_key}",
                      help="Restaura os valores padrão de calibração para este canal"):
-            # Restaurar valores padrão EXATOS para cada canal
+            # Restaurar valores padrão para cada canal
             if canal_key == 'azul':
                 default_data = np.array([
                     [24.86, 29.3, 27.6, 22.53, 29.51],
@@ -2329,7 +2347,7 @@ def exibir_calibracao_bancada():
             for rep in range(5):
                 cols = st.columns(6, width=800)
                 with cols[0]:
-                    st.markdown(f"**Repetição {rep+1}**")
+                    st.markdown(f"**{rep+1}**", text_alignment="center")
                 for intens in range(5):
                     with cols[intens+1]:
                         key = f"input_{canal_key}_{rep}_{intens}"
@@ -2341,13 +2359,13 @@ def exibir_calibracao_bancada():
                             step=0.1,
                             format="%.2f",
                             key=key,
-                            label_visibility="collapsed"
+                            label_visibility="collapsed",
                         )
                         if valor != dados_canal['dados'][rep, intens]:
                             dados_canal['dados'][rep, intens] = valor
                             sistema.calcular_regressoes()
 
-    # Criar gráfico ECharts para regressão
+    # Criar gráfico para regressão
     with col2:
         reg = sistema.regressoes[canal_key]
         x_ref = st.session_state.dados_bancada[canal_key]['valores_referencia']
@@ -2358,7 +2376,7 @@ def exibir_calibracao_bancada():
         # Adicionar repetições
         for rep in range(5):
             series_data.append({
-                "name": f'Repetição {rep+1}',
+                "name": f'Rep {rep+1}',
                 "type": "scatter",
                 "data": [[float(x_ref[i]), float(dados_canal['dados'][rep, i])] for i in range(5)],
                 "symbolSize": 8,
@@ -2406,7 +2424,7 @@ def exibir_calibracao_bancada():
             },
             "tooltip": {},
             "legend": {
-                "data": [f'Repetição {i+1}' for i in range(5)] + ['Média', 'Regressão (média)'],
+                "data": [f'Rep {i+1}' for i in range(5)] + ['Média', 'Regressão (média)'],
                 "top": "10%",
                 "type": "scroll"
             },
@@ -2432,8 +2450,7 @@ def exibir_calibracao_bancada():
         }
 
         st_echarts(options=options, height=500, key="calibracao_grafico",
-                   renderer="canvas",  # FORÇAR canvas
-                   theme="light")
+                   renderer="canvas")
 
 
 def exibir_configurar_canais():
@@ -2451,38 +2468,35 @@ def exibir_configurar_canais():
         }
 
     # Formulário de configuração
-    col3, col2, col1 = st.columns([1, 2, 2])
+    col1, col2, col3 = st.columns([1, 2, 2])
 
     with col1:
-        st.subheader("⚡ Intensidades Totais")
+        st.subheader("🔍 Visualizar", anchor=False)
+        # Seletor para visualização detalhada do canal
+        canal_selecionado = st.selectbox(
+            "Selecione o canal",
+            ["Vermelho", "Azul", "Branco"],
+            key="canal_detalhado_config",
+            index=["Vermelho", "Azul", "Branco"].index(
+                st.session_state.canal_configuracao_atual)
+        )
 
-        # Criar 2 colunas para os inputs lado a lado
-        col_max, col_min = st.columns(2)
+        # Armazenar a seleção atual
+        if canal_selecionado != st.session_state.canal_configuracao_atual:
+            st.session_state.canal_configuracao_atual = canal_selecionado
 
-        with col_max:
-            intensidade_max_total = st.number_input(
-                "Máx. Total (μmol/m²/s)",
-                min_value=0.0,
-                max_value=2000.0,
-                value=st.session_state.parametros_canais['intensidade_max_total'],
-                step=10.0,
-                key="int_max_total_config",
-                help="Intensidade máxima total combinada dos canais"
-            )
+        # Mapear seleção para nomes internos
+        canal_map = {
+            "Vermelho": ("vermelho", "🔴", "Vermelho"),
+            "Azul": ("azul", "🔵", "Azul"),
+            "Branco": ("branco", "⚪", "Branco")
+        }
 
-        with col_min:
-            intensidade_min_total = st.number_input(
-                "Mín. Total (μmol/m²/s)",
-                min_value=0.0,
-                max_value=1000.0,
-                value=st.session_state.parametros_canais['intensidade_min_total'],
-                step=10.0,
-                key="int_min_total_config",
-                help="Intensidade mínima total combinada dos canais"
-            )
+    canal_nome, emoji, nome_display = canal_map[canal_selecionado]
 
     with col2:
-        st.subheader("📊 Proporções entre Canais")
+        st.subheader("📊 Proporções",
+                     help="Proporção física entre os LEDs", anchor=False)
 
         # Number inputs con valores inteiros de 1 a 5
         col_slider1, col_slider2, col_slider3 = st.columns(3)
@@ -2523,6 +2537,62 @@ def exibir_configurar_canais():
                 help="Proporção do canal Branco (1 a 5)"
             )
 
+    with col3:
+        st.subheader("⚡ Intensidades Totais",
+                     help="Intensidades máximas e mínimas totais combinadas dos canais acima do mínimo e abaixo do máximo mensurados",
+                     anchor=False)
+
+        # Criar 2 colunas para os inputs lado a lado
+        col_max, col_min = st.columns(2)
+
+        with col_max:
+            intensidade_max_total = st.number_input(
+                "Máx. Total (μmol/m²/s)",
+                min_value=0.0,
+                max_value=2000.0,
+                value=st.session_state.parametros_canais['intensidade_max_total'],
+                step=10.0,
+                key="int_max_total_config",
+                help="Intensidade máxima total combinada dos canais"
+            )
+
+        with col_min:
+            intensidade_min_total = st.number_input(
+                "Mín. Total (μmol/m²/s)",
+                min_value=0.0,
+                max_value=1000.0,
+                value=st.session_state.parametros_canais['intensidade_min_total'],
+                step=10.0,
+                key="int_min_total_config",
+                help="Intensidade mínima total combinada dos canais"
+            )
+
+    # Exibir detalhes do canal selecionado
+    st.markdown("---")
+
+    # Obter dados do canal
+    dados = sistema.get_dados_canal(canal_nome)
+    params_gauss = st.session_state.parametros_gaussianos[f'canal_{canal_nome}']
+    params_temp = st.session_state.parametros_temporais
+
+    # Gráfico comparativo de intensidades
+    st.subheader(f"📈 Comparação de Intensidades - Todos os Canais")
+
+    # Obter dados de todos os canais para o gráfico comparativo
+    dados_vermelho = sistema.get_dados_canal('vermelho')
+    dados_azul = sistema.get_dados_canal('azul')
+    dados_branco = sistema.get_dados_canal('branco')
+
+    options_intensidades = criar_grafico_comparacao_intensidades(
+        dados_vermelho, dados_azul, dados_branco)
+    options_intensidades = apply_base_config(options_intensidades)
+
+    # Usar uma chave estável para o gráfico comparativo
+    st_echarts(options=options_intensidades, height=500,
+               key="comparacao_intensidades_config_principal")
+
+    st.subheader(f"{emoji} Detalhes do Canal {nome_display}")
+
     # Verificar se houve mudanças nos parâmetros
     mudancas_detectadas = False
     proporcoes_atual = (
@@ -2554,57 +2624,6 @@ def exibir_configurar_canais():
             'proporcao_branco': float(proporcao_branco)
         })
 
-    with col3:
-        st.subheader("🔍 Visualizar")
-        # Seletor para visualização detalhada do canal
-        canal_selecionado = st.selectbox(
-            "Selecione o canal para detalhes",
-            ["Vermelho", "Azul", "Branco"],
-            key="canal_detalhado_config",
-            index=["Vermelho", "Azul", "Branco"].index(
-                st.session_state.canal_configuracao_atual)
-        )
-
-        # Armazenar a seleção atual
-        if canal_selecionado != st.session_state.canal_configuracao_atual:
-            st.session_state.canal_configuracao_atual = canal_selecionado
-
-        # Mapear seleção para nomes internos
-        canal_map = {
-            "Vermelho": ("vermelho", "🔴", "Vermelho"),
-            "Azul": ("azul", "🔵", "Azul"),
-            "Branco": ("branco", "⚪", "Branco")
-        }
-
-    canal_nome, emoji, nome_display = canal_map[canal_selecionado]
-
-    # Exibir detalhes do canal selecionado
-    st.markdown("---")
-
-    # Obter dados do canal
-    dados = sistema.get_dados_canal(canal_nome)
-    params_gauss = st.session_state.parametros_gaussianos[f'canal_{canal_nome}']
-    params_temp = st.session_state.parametros_temporais
-
-    # Gráfico comparativo de intensidades
-    st.subheader(f"📈 Comparação de Intensidades - Todos os Canais")
-
-    # Obter dados de todos os canais para o gráfico comparativo
-    dados_vermelho = sistema.get_dados_canal('vermelho')
-    dados_azul = sistema.get_dados_canal('azul')
-    dados_branco = sistema.get_dados_canal('branco')
-
-    options_intensidades = criar_grafico_comparacao_intensidades(
-        dados_vermelho, dados_azul, dados_branco)
-    options_intensidades = apply_base_config(options_intensidades)
-
-    # Usar uma chave estável para o gráfico comparativo
-    st_echarts(options=options_intensidades, height=500,
-               key="comparacao_intensidades_config_principal")
-
-    st.subheader(f"{emoji} Detalhes do Canal {nome_display}")
-
-    # Container para os gráficos de detalhe
     container_detalhes = st.container()
 
     with container_detalhes:
@@ -2637,9 +2656,6 @@ def exibir_configurar_canais():
 def exibir_simular_espectro():
     """Exibe a interface para simulação de espectros usando ECharts"""
 
-    # Divisão em duas colunas para configurações
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-
     import json
     import os
     # Carregar espectros do arquivo spectra_data.json
@@ -2653,61 +2669,165 @@ def exibir_simular_espectro():
 
     spectra_data = load_spectra(spectra_path)
 
+    # Verificar consistência dos comprimentos entre 'wavelengths' e arrays de dados
+    def _check_spectra_lengths(spectra):
+        candidate_keys = ("irradiance", "transmittance",
+                          "absorbance", "values", "data")
+        problems = []
+        for name, obj in spectra.items():
+            wl = obj.get("wavelengths")
+            if not isinstance(wl, list):
+                problems.append(
+                    (name, "wavelengths missing or not list", None, None))
+                continue
+            wl_len = len(wl)
+            found = False
+            for k in candidate_keys:
+                if k in obj:
+                    found = True
+                    arr = obj.get(k)
+                    if not isinstance(arr, list):
+                        problems.append((name, k + " not list", wl_len, None))
+                    elif len(arr) != wl_len:
+                        problems.append((name, k, wl_len, len(arr)))
+                    break
+            if not found:
+                problems.append(
+                    (name, "no data array (irradiance/transmittance/absorbance/...)", wl_len, None))
+        return problems
+
+    inconsistencies = _check_spectra_lengths(spectra_data)
+    if inconsistencies:
+        # Agrupar todas as mensagens em um único balão para manter a interface limpa
+        lines = [
+            f"Foram encontradas {len(inconsistencies)} entradas com comprimentos inconsistentes em spectra_data.json:"]
+        for entry in inconsistencies:
+            name, key, wl_len, arr_len = entry
+            if arr_len is None:
+                lines.append(f" - {name}: {key} (wavelengths={wl_len})")
+            else:
+                lines.append(
+                    f" - {name}: {key} (wavelengths={wl_len} vs {key}={arr_len})")
+        st.warning("\n".join(lines))
+
+        # Oferecer ação de correção automática
+        if st.button("Corrigir automaticamente (interpolar) usando scripts/fix_spectra_interpolate.py"):
+            import subprocess
+            try:
+                res = subprocess.run(
+                    ["python3", "scripts/fix_spectra_interpolate.py"], capture_output=True, text=True, check=False)
+                st.code(res.stdout or "(sem saída)")
+                if res.stderr:
+                    st.error(res.stderr)
+                # limpar cache e recarregar os dados
+                try:
+                    load_spectra.clear()
+                except Exception:
+                    pass
+                spectra_data = load_spectra(spectra_path)
+                st.success(
+                    "Correção executada. spectra_data.json recarregado.")
+                # recomputar inconsistências para informar ao usuário
+                inconsistencies = _check_spectra_lengths(spectra_data)
+                if inconsistencies:
+                    lines2 = ["Após correção, ainda há inconsistências:"]
+                    for entry in inconsistencies:
+                        name, key, wl_len, arr_len = entry
+                        lines2.append(
+                            f" - {name}: {key} (wavelengths={wl_len} vs {key}={arr_len})")
+                    st.warning("\n".join(lines2))
+                    st.stop()
+                else:
+                    st.info(
+                        "Todos os espectros têm comprimentos compatíveis agora.")
+                    st.info(
+                        "Por favor, recarregue manualmente a página (F5) para aplicar as mudanças e continuar.")
+                    st.stop()
+            except Exception as e:
+                st.error(f"Falha ao executar o script de correção: {e}")
+
+        # Interromper a execução enquanto houver inconsistências para evitar renderizar gráficos
+        st.info("Corrija as inconsistências no arquivo spectra_data.json ou use o botão acima. A página ficará parada até a correção.")
+        st.stop()
+
     # Gerar nomes amigáveis para o selectbox
     def nome_amigavel(chave):
         nomes = {
-            "Chlorophyll a": "Clorofila A (Absorbância)",
-            "Chlorophyll b": "Clorofila B (Absorbância)",
-            "Beta Carotene": "Beta-caroteno (Absorbância)",
-            "Zeaxanthin": "Zeaxantina (Absorbância)",
-            "Anthocyanin": "Antocianina (Absorbância)",
-            "LED_Branco": "LED Branco 6500K (Transmittância)",
-            "LED_Azul": "LED Azul (Transmittância)",
-            "LED_Vermelho": "LED Vermelho (Transmittância)"
+            "Chlorophyll a": "Clorofila A (absorbância)",
+            "Chlorophyll b": "Clorofila B (absorbância)",
+            "Beta Carotene": "Beta-caroteno (absorbância)",
+            "Zeaxanthin": "Zeaxantina (absorbância)",
+            "Anthocyanin": "Antocianina (absorbância)",
+            "Phytochrome Pr": "Phytochrome Pr (absorbância)",
+            "Phytochrome Pfr": "Phytochrome Pfr (absorbância)",
+            "Cryptochrome": "Criptocromo (absorbância)",
+            "LOV": "LOV (absorbância)",
+            "Phycoerythrin": "Ficoeritrina (absorbância)",
+            "Phycocyanin": "Ficocianina (absorbância)",
+            "Allophycocyanin": "Aloficocianina (absorbância)",
+            "LED_Branco": "LED Branco (irradiância)",
+            "LED_Azul": "LED Azul (irradiância)",
+            "LED_Vermelho": "LED Vermelho (irradiância)"
         }
         return nomes.get(chave, chave)
 
     opcoes_espectros = list(spectra_data.keys())
     opcoes_amigaveis = [nome_amigavel(k) for k in opcoes_espectros]
+
+    # Divisão em duas colunas para configurações
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
+
     with col1:
         espectro_idx = st.selectbox(
             "Selecione o espectro de referência:",
             options=range(len(opcoes_amigaveis)),
             format_func=lambda i: opcoes_amigaveis[i],
-            index=0
+            index=0,
+            placeholder="Selecione um espectro..."
         )
         espectro_ref = opcoes_espectros[espectro_idx]
 
     # Configurações do usuário
     with col2:
         faixa_min = st.number_input(
-            "Comprimento de onda mínimo (nm):", 380, 780, 380)
+            " λ mínimo (nm):", 380, 780, 380)
 
     with col3:
         faixa_max = st.number_input(
-            "Comprimento de onda máximo (nm):", 380, 780, 780)
+            " λ máximo (nm):", 380, 780, 780)
 
     with col4:
+        resolucao = st.slider(
+            "Resolução espectral (nm):",
+            min_value=1, max_value=10, value=5, step=1,
+            help="Passo em nm para reamostragem quando não usar resolução nativa."
+        )
+    with col5:
+        limiar_picos_pct = st.slider(
+            "Limiar de picos (% do máximo):",
+            min_value=0, max_value=100, value=25, step=5,
+            help="Define o limiar relativo para detectar picos locais como porcentagem do valor máximo da série"
+
+        )
+        limiar_picos = float(limiar_picos_pct) / 100.0
+
+    c_native, c_log, col3, col4 = st.columns([1, 1, 1, 1])
+    with c_native:
         use_native = st.checkbox(
-            "Usar resolução nativa do espectro",
+            "Resolução nativa do espectro",
             value=False,
+            disabled=False,
             help="Se ativado, usa os comprimentos de onda originais do espectro selecionado (melhor fidelidade)."
         )
-
-        resolucao = st.slider(
-            "Resolução espectral (nm):", 1, 10, 5,
-            help="Passo em nm para reamostragem quando não usar resolução nativa."
+    with c_log:
+        use_norm_leds = st.checkbox(
+            "Visualizar LEDs normalizados (0-1)",
+            value=True,
+            help="Normaliza visualmente os espectros dos LEDs para o intervalo [0,1] apenas na visualização (não altera cálculos)."
         )
 
     # grid preliminar (pode ser sobrescrito pela resolução nativa mais abaixo)
     wavelengths = np.arange(faixa_min, faixa_max + resolucao, resolucao)
-
-    import json
-    import os
-    # Carregar espectros do arquivo spectra_data.json
-    spectra_path = os.path.join(os.path.dirname(__file__), "spectra_data.json")
-    with open(spectra_path, "r") as f:
-        spectra_data = json.load(f)
 
     espectro_json = spectra_data.get(espectro_ref)
     if espectro_json is None:
@@ -2744,11 +2864,11 @@ def exibir_simular_espectro():
             cor_espectro = "#2E86AB"
         elif "irradiance" in espectro_json:
             espectro_vals = np.array(espectro_json["irradiance"], dtype=float)
-            tipo_espectro = "irradiância"
+            tipo_espectro = "irradiance"
             cor_espectro = "#FFD166"
-        elif "transmittance" in espectro_json:
+        elif "irradiance" in espectro_json:
             espectro_vals = np.array(
-                espectro_json["transmittance"], dtype=float)
+                espectro_json["irradiance"], dtype=float)
             tipo_espectro = "transmittância"
             cor_espectro = "#E0E6ED"
         else:
@@ -2764,17 +2884,51 @@ def exibir_simular_espectro():
 
         # carregar LEDs e reamostrar
         def interp_led(key):
-            led_json = spectra_data.get(key)
+            led_json = spectra_data.get(key, {})
             if not led_json:
-                return np.zeros_like(wavelengths)
-            return np.interp(wavelengths, np.array(led_json["wavelengths"], dtype=float), np.array(led_json.get("transmittance", []), dtype=float))
+                return np.zeros_like(wavelengths, dtype=float)
+            xp = np.array(led_json.get("wavelengths", []), dtype=float)
+            # try common keys for led data
+            fp = None
+            for k in ("irradiance", "transmittance", "absorbance", "values", "data"):
+                if k in led_json:
+                    fp = np.array(led_json.get(k, []), dtype=float)
+                    break
+            if fp is None:
+                fp = np.array([])
+
+            if xp.size == 0 or fp.size == 0:
+                return np.zeros_like(wavelengths, dtype=float)
+
+            if xp.size == fp.size:
+                order = np.argsort(xp)
+                xp_s = xp[order]
+                fp_s = fp[order]
+                return np.interp(wavelengths, xp_s, fp_s)
+
+            if fp.size == 1:
+                return np.full_like(wavelengths, float(fp[0]), dtype=float)
+
+            # fallback: assume fp sampled uniformly across xp_range
+            try:
+                xp_fp = np.linspace(xp.min(), xp.max(), fp.size)
+                f = interp1d(xp_fp, fp, kind='linear',
+                             bounds_error=False, fill_value=0.0)
+                fp_on_xp = f(xp) if xp.size > 1 else np.full_like(
+                    xp, float(fp.mean()))
+                order = np.argsort(xp)
+                xp_s = xp[order]
+                fp_s = fp_on_xp[order]
+                return np.interp(wavelengths, xp_s, fp_s)
+            except Exception:
+                return np.zeros_like(wavelengths, dtype=float)
 
         led_vermelho = interp_led("LED_Vermelho")
         led_azul = interp_led("LED_Azul")
         led_branco = interp_led("LED_Branco")
 
-        # escala se for irradiância
-        if tipo_espectro == "irradiância" and espectro_ref_valores.sum() > 0:
+        # escala se for irradiance
+        if tipo_espectro == "irradiance" and espectro_ref_valores.sum() > 0:
             intensidade_ref = 650
             fator_escala = intensidade_ref / \
                 (np.trapezoid(espectro_ref_valores, wavelengths) / 1000)
@@ -2884,6 +3038,99 @@ def exibir_simular_espectro():
     tipo_espectro = computed['tipo_espectro']
     cor_espectro = computed['cor_espectro']
 
+    # --- Preparar arrays de visualização (não alteram os dados computados) ---
+    def _is_in_0_1(arr):
+        try:
+            a = np.array(arr, dtype=float)
+            if a.size == 0:
+                return False
+            amin = np.nanmin(a)
+            amax = np.nanmax(a)
+            return (np.isfinite(amin) and np.isfinite(amax) and amin >= 0.0 and amax <= 1.0)
+        except Exception:
+            return False
+
+    def _to_0_1_for_viz(arr):
+        a = np.array(arr, dtype=float)
+        if a.size == 0:
+            return a
+        if _is_in_0_1(a):
+            return a
+        # forçar não-negativos
+        a = np.where(np.isfinite(a), a, 0.0)
+        a[a < 0] = 0.0
+        amin = a.min()
+        amax = a.max()
+        if amax <= amin:
+            return np.zeros_like(a)
+        return (a - amin) / (amax - amin)
+
+    viz_led_vermelho = led_vermelho.copy()
+    viz_led_azul = led_azul.copy()
+    viz_led_branco = led_branco.copy()
+    if 'use_norm_leds' in locals() and use_norm_leds:
+        viz_led_vermelho = _to_0_1_for_viz(viz_led_vermelho)
+        viz_led_azul = _to_0_1_for_viz(viz_led_azul)
+        viz_led_branco = _to_0_1_for_viz(viz_led_branco)
+
+    # preparar markPoints com coordenadas de picos (pode identificar múltiplos picos)
+    def _peak_markpoints(wl, arr, rel_threshold=0.3, max_peaks=5):
+        try:
+            a = np.array(arr, dtype=float)
+            w = np.array(wl, dtype=float)
+            if a.size < 3 or w.size < 3:
+                return {}
+            # limiar relativo baseado no máximo
+            maxv = np.nanmax(a)
+            if not np.isfinite(maxv) or maxv <= 0:
+                return {}
+            thresh = maxv * float(rel_threshold)
+            points = []
+            for i in range(1, len(a)-1):
+                if a[i] > a[i-1] and a[i] > a[i+1] and a[i] >= thresh:
+                    points.append((float(w[i]), float(a[i])))
+            if not points:
+                # fallback: use global max if no local peaks above threshold
+                idx = int(np.nanargmax(a))
+                points = [(float(w[idx]), float(a[idx]))]
+            # limitar número de picos
+            points = points[:int(max_peaks)]
+            data = []
+            for (wx, vx) in points:
+                data.append({
+                    "coord": [wx, vx],
+                    "name": "Pico",
+                    "label": {"show": True, "formatter": f"{int(round(wx))} nm", "position": "top"}
+                })
+            return {
+                "data": data,
+                "symbol": "pin",
+                "itemStyle": {
+                    "borderColor": "#333",
+                    "borderWidth": 1,
+                    "shadowBlur": 8,
+                    "shadowColor": "rgba(0,0,0,0.25)",
+                    "opacity": 0.95
+                },
+                "symbolSize": [18, 18]
+            }
+        except Exception:
+            return {}
+
+    # usar limiar definido pelo usuário (limiar_picos) — fallback para valores padrão se não existir
+    try:
+        user_thresh = float(limiar_picos)
+    except Exception:
+        user_thresh = 0.25
+    mark_v = _peak_markpoints(
+        wavelengths, viz_led_vermelho, rel_threshold=user_thresh)
+    mark_a = _peak_markpoints(
+        wavelengths, viz_led_azul, rel_threshold=user_thresh)
+    mark_b = _peak_markpoints(
+        wavelengths, viz_led_branco, rel_threshold=user_thresh)
+    mark_ref = _peak_markpoints(
+        wavelengths, espectro_ref_valores, rel_threshold=max(0.05, user_thresh * 0.8))
+
     # ============================================================================
     # CÁLCULO DE ICE PARA CADA LAMP BASEADO NO ESPECTRO DE REFERÊNCIA
     # ============================================================================
@@ -2968,7 +3215,7 @@ def exibir_simular_espectro():
     with ph_leds:
         # Gráfico comparativo de LEDs
         options_leds = {
-            "color": [COLORS['soma'], COLORS['vermelho'], COLORS['azul'], COLORS['branco']],
+            "color": [COLORS['vermelho'], COLORS['azul'], COLORS['branco'], COLORS['referencia']],
             "title": {
                 "text": "Espectros dos LEDs da Bancada",
                 "subtext": "Espectros normalizados para comparação",
@@ -2980,8 +3227,7 @@ def exibir_simular_espectro():
                 "axisPointer": {"type": "cross"}
             },
             "legend": {
-                "data": [espectro_ref, "LED Vermelho", "LED Azul",
-                         "LED Branco"],
+                "data": ["LED Vermelho", "LED Azul", "LED Branco", espectro_ref],
                 "top": "10%",
                 "type": "scroll",
                 "padding": [50, 0, 0, 0],
@@ -3005,21 +3251,10 @@ def exibir_simular_espectro():
             },
             "series": [
                 {
-                    "name": espectro_ref,
-                    "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
-                    "smooth": True,
-                    "lineStyle": {
-                        "color": cor_espectro,
-                        "width": 1,
-                        "type": "dashed"
-                    },
-                    "showSymbol": False
-                },
-                {
                     "name": "LED Vermelho",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_vermelho)],
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_vermelho)],
+                    "markPoint": mark_v,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['vermelho'], "width": 2},
                     "areaStyle": {
@@ -3039,7 +3274,8 @@ def exibir_simular_espectro():
                 {
                     "name": "LED Azul",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_azul)],
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_azul)],
+                    "markPoint": mark_a,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['azul'], "width": 2},
                     "areaStyle": {
@@ -3057,7 +3293,8 @@ def exibir_simular_espectro():
                 {
                     "name": "LED Branco",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, led_branco)],
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_branco)],
+                    "markPoint": mark_b,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['branco'], "width": 2},
                     "areaStyle": {
@@ -3067,24 +3304,51 @@ def exibir_simular_espectro():
                             "colorStops": [
                                 {"offset": 0,
                                     "color": COLORS['branco'] + "40"},
-                                {"offset": 1,
-                                    "color": COLORS['branco'] + "05"}
+                                {"offset": 1, "color": COLORS['branco'] + "05"}
                             ]
                         }
                     },
                     "showSymbol": False
+                },
+                {
+                    "name": espectro_ref,
+                    "type": "line",
+                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
+                    "markPoint": mark_ref,
+                    "smooth": True,
+                    "lineStyle": {
+                        "color": COLORS['referencia'],
+                        "width": 1,
+                        "type": "dashed"
+                    },
+                    "showSymbol": False
+                },
+            ],
+            "dataZoom": [
+                {"type": "inside", "xAxisIndex": 0},
+                {
+                    "show": True,
+                    "xAxisIndex": 0,
+                    "type": "slider",
+                    "bottom": 10,
+                    "height": 20,
+                    "borderColor": "transparent",
+                    "handleStyle": {"color": COLORS['vermelho']},
+                    "fillerColor": "rgba(84, 112, 198, 0.1)",
+                    "textStyle": {"color": "#666"}
                 }
             ],
             "grid": {
                 "left": "30px",
                 "right": "40px",
-                "bottom": "20px",
-                "top": "80px",
+                "bottom": "60px",
+                "top": "110px",
                 "containLabel": True
             }
         }
         st_echarts(options=apply_base_config(options_leds),
                    height=350, key="espectros_leds")
+
     with ph_lamp:
         # Gráfico dos espectros LAMP_CH
         options_lamp_espectros = {
@@ -3101,7 +3365,7 @@ def exibir_simular_espectro():
             },
             "legend": {
                 "data": ["LAMP_CH1 (Vermelho)", "LAMP_CH2 (Azul)",
-                         "LAMP_CH3 (Branco)", "Soma Total", "Referência"],
+                         "LAMP_CH3 (Branco)", "Soma Total", espectro_ref],
                 "type": "scroll",
                 "top": "10%",
                 "padding": [50, 0, 0, 0],
@@ -3129,7 +3393,7 @@ def exibir_simular_espectro():
                     "type": "line",
                     "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch1)],
                     "smooth": True,
-                    "lineStyle": {"color": COLORS['vermelho'], "width": 1, "type": "dashed"},
+                    "lineStyle": {"color": COLORS['vermelho'], "width": 2},
                     "areaStyle": {
                         "color": {
                             "type": "linear",
@@ -3149,16 +3413,14 @@ def exibir_simular_espectro():
                     "type": "line",
                     "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch2)],
                     "smooth": True,
-                    "lineStyle": {"color": COLORS['azul'], "width": 1, "type": "dashed"},
+                    "lineStyle": {"color": COLORS['azul'], "width": 2},
                     "areaStyle": {
                         "color": {
                             "type": "linear",
                             "x": 0, "y": 0, "x2": 0, "y2": 1,
                             "colorStops": [
-                                {"offset": 0,
-                                    "color": COLORS['azul'] + "40"},
-                                {"offset": 1,
-                                    "color": COLORS['azul'] + "05"}
+                                {"offset": 0, "color": COLORS['azul'] + "40"},
+                                {"offset": 1, "color": COLORS['azul'] + "05"}
                             ]
                         }
                     },
@@ -3169,7 +3431,7 @@ def exibir_simular_espectro():
                     "type": "line",
                     "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch3)],
                     "smooth": True,
-                    "lineStyle": {"color": COLORS['branco'], "width": 1, "type": "dashed"},
+                    "lineStyle": {"color": COLORS['branco'], "width": 2},
                     "areaStyle": {
                         "color": {
                             "type": "linear",
@@ -3205,30 +3467,32 @@ def exibir_simular_espectro():
                     "showSymbol": False
                 },
                 {
-                    "name": "Referência",
+                    "name": espectro_ref,
                     "type": "line",
                     "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
                     "smooth": True,
-                    "lineStyle": {"color": cor_espectro, "width": 2, "type": "dot"},
-                    "areaStyle": {
-                        "color": {
-                            "type": "linear",
-                            "x": 0, "y": 0, "x2": 0, "y2": 1,
-                            "colorStops": [
-                                {"offset": 0,
-                                    "color": COLORS['referencia'] + "40"},
-                                {"offset": 1,
-                                    "color": COLORS['referencia'] + "05"}
-                            ]
-                        }
-                    },
+                    "lineStyle": {"color": COLORS['referencia'], "width": 1, "type": "dashed"},
                     "showSymbol": False
+                }
+            ],
+            "dataZoom": [
+                {"type": "inside", "xAxisIndex": 0},
+                {
+                    "show": True,
+                    "xAxisIndex": 0,
+                    "type": "slider",
+                    "bottom": 10,
+                    "height": 20,
+                    "borderColor": "transparent",
+                    "handleStyle": {"color": COLORS['vermelho']},
+                    "fillerColor": "rgba(84, 112, 198, 0.1)",
+                    "textStyle": {"color": "#666"}
                 }
             ],
             "grid": {
                 "left": "30px",
                 "right": "40px",
-                "bottom": "20px",
+                "bottom": "60px",
                 "top": "80px",
                 "containLabel": True
             }
@@ -3275,7 +3539,7 @@ def exibir_simular_espectro():
 
         st.dataframe(df_ice_fixo, use_container_width=True, hide_index=True)
 
-    with col_ice2:
+    with ph_ice:
         # Gráfico de barras mostrando ICE fixo por canal
         # Preparar dados para o gráfico
         data_barras_ice = [
@@ -3448,20 +3712,3 @@ elif aba_selecionada == "🎛️ Configurar Canais":
     exibir_configurar_canais()
 elif aba_selecionada == "༗ Espectros":
     exibir_simular_espectro()
-
-# 6. Rodapé otimizado
-st.markdown("---")
-with st.container():
-    footer_cols = st.columns(3)
-
-    with footer_cols[0]:
-        st.caption("**Sistema LAAC v1.0**")
-        st.caption("Spectral Int")
-
-    with footer_cols[1]:
-        st.caption("**Contato:**")
-        st.caption("laac@ufv.br")
-
-    with footer_cols[2]:
-        st.caption("**Última atualização:**")
-        st.caption(datetime.now().strftime("%d/%m/%Y %H:%M"))
