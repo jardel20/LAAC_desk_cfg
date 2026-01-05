@@ -3,6 +3,7 @@ import numpy as np
 import streamlit as st
 import zipfile
 import io
+import json
 from datetime import datetime
 from scipy import stats
 from scipy.interpolate import interp1d
@@ -498,27 +499,41 @@ def apply_base_config(options):
             "containLabel": True
         }
 
-    # CToolbox con saveAsImage funcionando
-    options["toolbox"] = {
-        "feature": {
-            "dataView": {
-                "show": True,
-                "title": "Ver dados",
-                "readOnly": True,
-                "lang": ["Visualização", "Fechar", "Atualizar"]
+    # CToolbox com fullscreen
+    if "toolbox" not in options:
+        options["toolbox"] = {
+            "feature": {
+                "dataView": {
+                    "show": True,
+                    "title": "Ver dados",
+                    "readOnly": True,
+                    "lang": ["Visualização", "Fechar", "Atualizar"]
+                },
+                "restore": {
+                    "show": True,
+                    "title": "Restaurar"
+                },
+                "fullscreen": {
+                    "show": True,
+                    "title": "Tela Cheia"
+                }
             },
-            "restore": {
-                "show": True,
-                "title": "Restaurar"
-            },
-        },
-        "right": 10,
-        "top": 10,
-        "orient": "vertical",
-        "itemSize": 18,
-        "itemGap": 8,
-        "showTitle": True
-    }
+            "right": 20,
+            "top": 20,
+            "orient": "vertical",
+            "itemSize": 22,
+            "itemGap": 12,
+            "showTitle": True
+        }
+    else:
+        # Se já existe toolbox, garantir que tem fullscreen
+        if "feature" not in options["toolbox"]:
+            options["toolbox"]["feature"] = {}
+
+        options["toolbox"]["feature"]["fullscreen"] = {
+            "show": True,
+            "title": "Tela Cheia"
+        }
 
     # ANIMAÇÕES
 
@@ -2671,7 +2686,7 @@ def exibir_simular_espectro():
 
     # Verificar consistência dos comprimentos entre 'wavelengths' e arrays de dados
     def _check_spectra_lengths(spectra):
-        candidate_keys = ("irradiance", "transmittance",
+        candidate_keys = ("irradiance",
                           "absorbance", "values", "data")
         problems = []
         for name, obj in spectra.items():
@@ -2693,7 +2708,7 @@ def exibir_simular_espectro():
                     break
             if not found:
                 problems.append(
-                    (name, "no data array (irradiance/transmittance/absorbance/...)", wl_len, None))
+                    (name, "no data array (irradiance/absorbance/...)", wl_len, None))
         return problems
 
     inconsistencies = _check_spectra_lengths(spectra_data)
@@ -2787,14 +2802,11 @@ def exibir_simular_espectro():
         )
         espectro_ref = opcoes_espectros[espectro_idx]
 
-    # Configurações do usuário
     with col2:
-        faixa_min = st.number_input(
-            " λ mínimo (nm):", 380, 780, 380)
+        faixa_min = st.number_input(" λ mínimo (nm):", 380, 780, 380)
 
     with col3:
-        faixa_max = st.number_input(
-            " λ máximo (nm):", 380, 780, 780)
+        faixa_max = st.number_input(" λ máximo (nm):", 380, 780, 780)
 
     with col4:
         resolucao = st.slider(
@@ -2802,6 +2814,7 @@ def exibir_simular_espectro():
             min_value=1, max_value=10, value=5, step=1,
             help="Passo em nm para reamostragem quando não usar resolução nativa."
         )
+
     with col5:
         limiar_picos_pct = st.slider(
             "Limiar de picos:",
@@ -2812,6 +2825,7 @@ def exibir_simular_espectro():
         limiar_picos = float(limiar_picos_pct) / 100.0
 
     c_native, c_log, col3, col4 = st.columns([2, 2, 1, 1])
+
     with c_native:
         use_native = st.checkbox(
             "Resolução nativa do espectro",
@@ -2819,6 +2833,7 @@ def exibir_simular_espectro():
             disabled=False,
             help="Se ativado, usa os comprimentos de onda originais do espectro selecionado (melhor fidelidade)."
         )
+
     with c_log:
         use_norm_leds = st.checkbox(
             "Visualizar LEDs normalizados (0-1)",
@@ -2866,11 +2881,6 @@ def exibir_simular_espectro():
             espectro_vals = np.array(espectro_json["irradiance"], dtype=float)
             tipo_espectro = "irradiance"
             cor_espectro = "#FFD166"
-        elif "irradiance" in espectro_json:
-            espectro_vals = np.array(
-                espectro_json["irradiance"], dtype=float)
-            tipo_espectro = "transmittância"
-            cor_espectro = "#E0E6ED"
         else:
             espectro_vals = np.array([])
             tipo_espectro = "unknown"
@@ -2890,7 +2900,7 @@ def exibir_simular_espectro():
             xp = np.array(led_json.get("wavelengths", []), dtype=float)
             # try common keys for led data
             fp = None
-            for k in ("irradiance", "transmittance", "absorbance", "values", "data"):
+            for k in ("irradiance", "absorbance", "values", "data"):
                 if k in led_json:
                     fp = np.array(led_json.get(k, []), dtype=float)
                     break
@@ -2976,8 +2986,10 @@ def exibir_simular_espectro():
 
         coef = calcular_lamp_otimo(
             espectro_ref_valores, led_vermelho, led_azul, led_branco)
+
         proporcoes_lamp = {
             'LAMP_CH1_Vermelho': coef[0], 'LAMP_CH2_Azul': coef[1], 'LAMP_CH3_Branco': coef[2]}
+
         lamp_ch1 = led_vermelho * proporcoes_lamp['LAMP_CH1_Vermelho']
         lamp_ch2 = led_azul * proporcoes_lamp['LAMP_CH2_Azul']
         lamp_ch3 = led_branco * proporcoes_lamp['LAMP_CH3_Branco']
@@ -3038,7 +3050,7 @@ def exibir_simular_espectro():
     tipo_espectro = computed['tipo_espectro']
     cor_espectro = computed['cor_espectro']
 
-    # --- Preparar arrays de visualização (não alteram os dados computados) ---
+    # Preparar arrays de visualização (não alteram os dados computados)
     def _is_in_0_1(arr):
         try:
             a = np.array(arr, dtype=float)
@@ -3068,6 +3080,7 @@ def exibir_simular_espectro():
     viz_led_vermelho = led_vermelho.copy()
     viz_led_azul = led_azul.copy()
     viz_led_branco = led_branco.copy()
+
     if 'use_norm_leds' in locals() and use_norm_leds:
         viz_led_vermelho = _to_0_1_for_viz(viz_led_vermelho)
         viz_led_azul = _to_0_1_for_viz(viz_led_azul)
@@ -3253,7 +3266,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LED Vermelho",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_vermelho)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_vermelho)],
                     "markPoint": mark_v,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['vermelho'], "width": 2},
@@ -3274,7 +3287,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LED Azul",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_azul)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_azul)],
                     "markPoint": mark_a,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['azul'], "width": 2},
@@ -3293,7 +3306,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LED Branco",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_branco)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, viz_led_branco)],
                     "markPoint": mark_b,
                     "smooth": True,
                     "lineStyle": {"color": COLORS['branco'], "width": 2},
@@ -3313,7 +3326,7 @@ def exibir_simular_espectro():
                 {
                     "name": espectro_ref,
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
                     "markPoint": mark_ref,
                     "smooth": True,
                     "lineStyle": {
@@ -3391,7 +3404,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LAMP_CH1 (Vermelho)",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch1)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch1)],
                     "smooth": True,
                     "lineStyle": {"color": COLORS['vermelho'], "width": 2},
                     "areaStyle": {
@@ -3411,7 +3424,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LAMP_CH2 (Azul)",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch2)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch2)],
                     "smooth": True,
                     "lineStyle": {"color": COLORS['azul'], "width": 2},
                     "areaStyle": {
@@ -3429,7 +3442,7 @@ def exibir_simular_espectro():
                 {
                     "name": "LAMP_CH3 (Branco)",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch3)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_ch3)],
                     "smooth": True,
                     "lineStyle": {"color": COLORS['branco'], "width": 2},
                     "areaStyle": {
@@ -3449,7 +3462,7 @@ def exibir_simular_espectro():
                 {
                     "name": "Soma Total",
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_soma)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, lamp_soma)],
                     "smooth": True,
                     "lineStyle": {"color": COLORS['soma'], "width": 2},
                     "areaStyle": {
@@ -3469,7 +3482,7 @@ def exibir_simular_espectro():
                 {
                     "name": espectro_ref,
                     "type": "line",
-                    "data": [[float(round(wl, 4)), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
+                    "data": [[float(wl), float(round(val, 4))] for wl, val in zip(wavelengths, espectro_ref_valores)],
                     "smooth": True,
                     "lineStyle": {"color": COLORS['referencia'], "width": 1, "type": "dashed"},
                     "showSymbol": False
